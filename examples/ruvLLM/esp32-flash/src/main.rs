@@ -552,34 +552,14 @@ fn format_u32(n: u32) -> HString<16> {
 // ============================================================================
 
 #[cfg(feature = "esp32")]
-fn jtag_write(s: &str) {
-    use core::ffi::c_void;
-    unsafe {
-        esp_idf_svc::sys::usb_serial_jtag_write_bytes(
-            s.as_ptr() as *const c_void,
-            s.len(),
-            20,
-        );
-    }
-}
-
-#[cfg(feature = "esp32")]
-fn jtag_writeln(s: &str) {
-    jtag_write(s);
-    jtag_write("\r\n");
-}
-
-#[cfg(feature = "esp32")]
 fn main() -> anyhow::Result<()> {
     link_patches();
 
-    // ADR-166 §10: polling-mode USB-Serial/JTAG console is what's actually
-    // wired up on this trio (esp-idf-sys 0.36.1 / esp-idf-svc 0.51.0 /
-    // ESP-IDF v5.1.2). `usb_serial_jtag_write_bytes` reaches /dev/ttyACM0;
-    // std::io::stdout/stderr are routed to UART0 (which has no wires on the
-    // ESP32-S3 native-USB dev board) and so go nowhere. Banner + role +
-    // stats use the FFI write helpers below. Bidirectional CLI is gated on
-    // ADR-166 §10 polish (driver-install path needs more work in this trio).
+    // Portable stdio path — compiles for every ESP32 variant. `eprintln!`
+    // routes to whatever ESP-IDF console is configured for the target
+    // (USB-Serial/JTAG on S3/C3/C6, UART0 on original ESP32 and S2).
+    // ADR-166 §10 documents per-chip output behavior; the interactive CLI
+    // polish needs a per-chip driver-install path.
 
     let variant = match option_env!("RUVLLM_VARIANT") {
         Some(s) => parse_variant(s).unwrap_or(Esp32Variant::Esp32S3),
@@ -591,53 +571,31 @@ fn main() -> anyhow::Result<()> {
     };
     let chip_id = ChipId(option_env!("RUVLLM_CHIP_ID").and_then(|s| s.parse().ok()).unwrap_or(0));
 
-    jtag_writeln("");
-    jtag_writeln("=== ruvllm-esp32 tiny-agent (ADR-165) ===");
-
-    let mut hdr: HString<128> = HString::new();
-    let _ = hdr.push_str("variant=");
-    let _ = hdr.push_str(variant_name(variant));
-    let _ = hdr.push_str(" role=");
-    let _ = hdr.push_str(role.as_str());
-    let _ = hdr.push_str(" chip_id=");
-    let _ = hdr.push_str(&format_u32(chip_id.0 as u32));
-    let _ = hdr.push_str(" sram_kb=");
-    let _ = hdr.push_str(&format_u32((variant.sram_bytes() / 1024) as u32));
-    jtag_writeln(&hdr);
+    use std::io::Write as _;
+    let mut err = std::io::stderr();
+    let _ = writeln!(err);
+    let _ = writeln!(err, "=== ruvllm-esp32 tiny-agent (ADR-165) ===");
+    let _ = writeln!(err, "variant={} role={} chip_id={} sram_kb={}",
+        variant_name(variant), role.as_str(), chip_id.0,
+        variant.sram_bytes() / 1024);
+    let _ = err.flush();
 
     let mut agent = TinyAgent::new(variant, role, chip_id);
-    jtag_writeln("[ready] type 'help' for commands");
-    jtag_writeln(agent.stats_line().as_str());
+    let _ = writeln!(err, "[ready] type 'help' for commands");
+    let _ = writeln!(err, "{}", agent.stats_line());
+    let _ = err.flush();
 
-    // Read loop using the same FFI surface. Without the interrupt-mode
-    // driver, this is a poll — fine for a smoke demo, see ADR-166 §10.
-    let mut linebuf = [0u8; 256];
-    let mut n: usize = 0;
-    loop {
-        let mut byte = 0u8;
-        let r = unsafe {
-            esp_idf_svc::sys::usb_serial_jtag_read_bytes(
-                &mut byte as *mut u8 as *mut core::ffi::c_void,
-                1,
-                100,
-            )
-        };
-        if r > 0 {
-            if byte == b'\r' || byte == b'\n' {
-                if n > 0 {
-                    let cmd = core::str::from_utf8(&linebuf[..n]).unwrap_or("");
-                    let resp = process_command(cmd, &mut agent);
-                    jtag_writeln(resp.as_str());
-                    n = 0;
-                }
-            } else if byte == 0x7f || byte == 0x08 {
-                if n > 0 { n -= 1; }
-            } else if n < linebuf.len() {
-                linebuf[n] = byte;
-                n += 1;
-            }
-        }
+    use std::io::{self, BufRead};
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = match line { Ok(l) => l, Err(_) => continue };
+        let resp = process_command(line.trim(), &mut agent);
+        let _ = writeln!(err, "{}", resp.as_str());
+        let _ = err.flush();
     }
+
+    // stdin closed; keep the device alive.
+    loop { std::thread::sleep(std::time::Duration::from_secs(60)); }
 }
 
 #[cfg(all(not(feature = "esp32"), feature = "host-test"))]
