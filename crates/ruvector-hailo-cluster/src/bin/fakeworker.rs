@@ -202,11 +202,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     rt.block_on(async move {
+        let mut server = Server::builder();
+        // Iter 121: TLS parity with the real worker (iter 99). Same
+        // env-var contract: RUVECTOR_TLS_CERT + RUVECTOR_TLS_KEY both
+        // set → TLS active. Either one alone is a misconfig and
+        // halts (matches the worker's loud-fail pattern). Lets the
+        // bridge integration tests stand up a TLS-enabled worker
+        // without needing a separate test bin.
+        #[cfg(feature = "tls")]
+        {
+            let cert = std::env::var("RUVECTOR_TLS_CERT").ok();
+            let key = std::env::var("RUVECTOR_TLS_KEY").ok();
+            match (cert, key) {
+                (Some(c), Some(k)) => {
+                    let mut tls =
+                        ruvector_hailo_cluster::tls::TlsServer::from_pem_files(&c, &k)
+                            .map_err(|e| format!("tls server config: {}", e))?;
+                    if let Ok(ca) = std::env::var("RUVECTOR_TLS_CLIENT_CA") {
+                        tls = tls
+                            .with_client_ca(&ca)
+                            .map_err(|e| format!("client_ca: {}", e))?;
+                    }
+                    server = server
+                        .tls_config(tls.into_inner())
+                        .map_err(|e| format!("apply tls: {}", e))?;
+                    info!(cert = %c, "fakeworker TLS enabled");
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        "RUVECTOR_TLS_CERT and RUVECTOR_TLS_KEY must both be set or both unset"
+                            .to_string(),
+                    );
+                }
+                (None, None) => {}
+            }
+        }
         info!(addr = %bind, "ruvector-hailo-fakeworker serving");
-        Server::builder()
+        server
             .add_service(EmbeddingServer::new(svc))
             .serve_with_shutdown(bind, shutdown_signal())
             .await
+            .map_err(|e| format!("serve: {}", e))?;
+        Ok::<(), String>(())
     })?;
 
     Ok(())
