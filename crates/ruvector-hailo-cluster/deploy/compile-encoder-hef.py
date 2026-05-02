@@ -49,10 +49,13 @@ def main(onnx_path: str, out_hef: str) -> None:
     print(f"    parsed HAR → {parsed_har}", flush=True)
 
     print("==> [optimize] random calibration set (FP→INT8)", flush=True)
-    # Iter 139 (single-input form): random calibration. The single-input
-    # graph avoids the multi-input LayerNorm decomposition KeyError seen
-    # in the iter-139 first attempt. Full-precision can't compile —
-    # Hailo-8 hardware requires INT8 quantized weights.
+    # Iter 139c: drop optimization_level to 0 (CPU mode, least aggressive).
+    # This skips the SDK's LayerNorm decomposition algorithm that hits
+    # `KeyError: 'minilm_encoder/input_layer1'` on the encoder graph.
+    # Trade-off: less aggressive INT8 quantization → larger accuracy
+    # loss, but produces a working HEF for the first end-to-end shot.
+    runner.load_model_script("model_optimization_flavor(optimization_level=0)\n")
+
     rng = np.random.default_rng(seed=42)
     calib = {
         "hidden_states": rng.standard_normal((64, SEQ_LEN, HIDDEN), dtype=np.float32),
