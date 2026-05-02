@@ -93,13 +93,17 @@ quantization_param({ew_add*}, precision_mode=a16_w16)
     # Hailo's HN treats inputs as 4D NCHW with implicit channels=1, so
     # [batch, seq, hidden] reshapes to [batch, 1, seq, hidden].
     # The mask is already 4D [batch, 1, 1, seq].
+    # Iter 144c: mask is [batch, 1, seq, 1] in HN order (W=1) — Hailo
+    # treats the seq dim as H and the broadcast dim as W. Verified by
+    # AccelerasValueError on iter 144b: HN shape [-1, 1, 128, 1] vs
+    # our incorrect [-1, 1, 1, 128].
     if len(input_layer_names) >= 2:
         calib = {
             input_layer_names[0]: rng.standard_normal(
                 (64, 1, SEQ_LEN, HIDDEN), dtype=np.float32
             ),
             input_layer_names[1]: np.zeros(
-                (64, 1, 1, SEQ_LEN), dtype=np.float32
+                (64, 1, SEQ_LEN, 1), dtype=np.float32
             ),
         }
     else:
@@ -108,7 +112,7 @@ quantization_param({ew_add*}, precision_mode=a16_w16)
                 (64, 1, SEQ_LEN, HIDDEN), dtype=np.float32
             ),
             "attention_softmax_mask": np.zeros(
-                (64, 1, 1, SEQ_LEN), dtype=np.float32
+                (64, 1, SEQ_LEN, 1), dtype=np.float32
             ),
         }
     runner.optimize(calib)
