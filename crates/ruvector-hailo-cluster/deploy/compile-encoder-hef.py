@@ -145,24 +145,15 @@ quantization_param({ew_add*}, precision_mode=a16_w16)
     # treats the seq dim as H and the broadcast dim as W. Verified by
     # AccelerasValueError on iter 144b: HN shape [-1, 1, 128, 1] vs
     # our incorrect [-1, 1, 1, 128].
-    if len(input_layer_names) >= 2:
-        calib = {
-            input_layer_names[0]: rng.standard_normal(
-                (64, 1, SEQ_LEN, HIDDEN), dtype=np.float32
-            ),
-            input_layer_names[1]: np.zeros(
-                (64, 1, SEQ_LEN, 1), dtype=np.float32
-            ),
-        }
-    else:
-        calib = {
-            "hidden_states": rng.standard_normal(
-                (64, 1, SEQ_LEN, HIDDEN), dtype=np.float32
-            ),
-            "attention_softmax_mask": np.zeros(
-                (64, 1, SEQ_LEN, 1), dtype=np.float32
-            ),
-        }
+    # Iter 156 — single-input form. Use the introspected internal name
+    # so stats_collection finds the dict key (iter-142 fix).
+    calib_key = input_layer_names[0] if input_layer_names else "hidden_states"
+    print(f"    calibration dict key: {calib_key}", flush=True)
+    calib = {
+        calib_key: rng.standard_normal(
+            (64, 1, SEQ_LEN, HIDDEN), dtype=np.float32
+        ),
+    }
     runner.optimize(calib)
     opt_har = work / f"{NET_NAME}_optimized.har"
     runner.save_har(str(opt_har))
