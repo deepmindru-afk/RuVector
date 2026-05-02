@@ -66,6 +66,26 @@ re-exported the BERT encoder block in isolation:
   quantized weights (full-precision HEF would be possible on
   hailo15h but not hailo8).
 
+**Iter 144 follow-up** (after finding Hailo's BERT recipe in
+`hailo_model_zoo/cfg/alls/generic/bert_base_uncased.alls`):
+- Adopted Hailo's two-input form: `hidden_states` (post-embedding) +
+  `attention_softmax_mask` (pre-broadcast 4D bias). Parser maps these
+  cleanly to `input_layer1` + `input_layer2`. End node:
+  `/encoder/layer.5/output/LayerNorm/Add_1`.
+- Loaded Hailo's BERT alls directives (equalization on, ew_add_fusing
+  off, optimization_level=0, matmul_correction zp_comp_block,
+  negative_exponent rank=0, ew_add a16w16). DFC 3.33 doesn't ship
+  `set_input_mask_to_softmax()` (the Hailo Model Zoo's key directive
+  for transformers — verified via grep of installed site-packages,
+  zero matches), so we drop just that line.
+- Hailo's HN treats the mask as `[N, 1, seq, 1]` (seq is H, broadcast
+  is W), not `[N, 1, 1, seq]` — fixed via shape transpose.
+- After all that: STILL hits the Keras `ElementwiseAddDirectOp`
+  deserialization bug from iter 142b. The optimizer's spawned
+  subprocess doesn't have the SDK's custom layer registry loaded,
+  so deepcopy round-trip fails. This is the same bug regardless of
+  whether we use Hailo's official BERT alls or our own.
+
 **Iter 142/142b/143 follow-up debugging** (after reading the SDK source):
 - Root-caused the iter-139 `KeyError` to a mismatch between
   `_get_build_inputs` (returns dict keyed by user dataset keys) and

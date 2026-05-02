@@ -363,6 +363,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let device_id = embedder.device_id().to_string();
 
+    // Iter 145: startup self-test. When a model is loaded (cpu-fallback
+    // or HEF), do one embed to validate the full path before opening
+    // the gRPC port. Catches stale model files, corrupt safetensors,
+    // and op-set mismatches at boot rather than at first traffic.
+    // No-op when no model is loaded (worker still serves; embed RPCs
+    // return NoModelLoaded honestly).
+    if embedder.has_model() {
+        let probe_text = "ruvector-hailo-worker startup self-test";
+        match embedder.embed(probe_text) {
+            Ok(v) => {
+                let dim = v.len();
+                let head: Vec<String> =
+                    v.iter().take(4).map(|x| format!("{:.4}", x)).collect();
+                info!(
+                    dim,
+                    vec_head = %head.join(","),
+                    "startup self-test embed ok"
+                );
+            }
+            Err(e) => {
+                error!(error = %e, "startup self-test embed FAILED — refusing to serve");
+                return Err(format!(
+                    "startup self-test embed failed: {} \
+                     (model dir loaded but inference path is broken; \
+                     fix the model artifacts and restart)",
+                    e
+                )
+                .into());
+            }
+        }
+    } else {
+        warn!(
+            "no model loaded (has_model=false) — worker will serve health \
+             but embed RPCs return NoModelLoaded until a model is wired in"
+        );
+    }
+
     // Iter 95 (ADR-174 §93): log the NPU on-die temperature once at
     // startup so operators see baseline thermal state without polling.
     // Hailo-8 has two thermal sensors per die; we log both. None means
