@@ -70,29 +70,16 @@ def main(onnx_path: str, out_hef: str) -> None:
 
     print(f"==> [parse] {onnx_path}", flush=True)
     runner = ClientRunner(hw_arch=HW_ARCH)
-    # Iter 154: explicit input formats. Without these, Hailo's allocator
-    # treats the rank-4 mask input as an "RGB image" and applies a
-    # `tf_rgb_to_hailo_rgb` format conversion that requires C aligned
-    # to 8. Our mask has C=1 → "output features not aligned to 8" hard
-    # fail at compile-time. Spelling out the dim semantics tells the
-    # allocator these are pure feature tensors, not images.
-    from hailo_sdk_client.exposed_definitions import Dims
+    # Iter 156 — single-input form to avoid the iter-154 RGB conversion
+    # blocker on the rank-4 mask. Encoder runs full attention; host-side
+    # mean-pool applies the real attention mask post-NPU.
     runner.translate_onnx_model(
         str(onnx_path),
         net_name=NET_NAME,
-        start_node_names=["hidden_states", "attention_softmax_mask"],
+        start_node_names=["hidden_states"],
         end_node_names=["last_hidden_state"],
         net_input_shapes={
             "hidden_states": [1, SEQ_LEN, HIDDEN],
-            "attention_softmax_mask": [1, 1, 1, SEQ_LEN],
-        },
-        net_input_format={
-            # rank-3 hidden_states: NWC (Hailo default for rank-3)
-            "hidden_states": [Dims.BATCH, Dims.WIDTH, Dims.CHANNELS],
-            # rank-4 mask: NCHW with C=1 — explicitly mark as feature
-            # tensor (not RGB image) so the allocator skips the
-            # rgb-to-rgb format conversion.
-            "attention_softmax_mask": [Dims.BATCH, Dims.CHANNELS, Dims.HEIGHT, Dims.WIDTH],
         },
     )
 
@@ -120,6 +107,9 @@ def main(onnx_path: str, out_hef: str) -> None:
     # inside a spawned subprocess that doesn't carry the SDK's custom
     # layer registry. Disabling multiproc keeps the optimizer in-process
     # so the @register_keras_serializable decorations stay loaded.
+    # Iter 156 — single-input form. Drop iter-155 mask input_conversion
+    # (no longer needed, no mask input). Keep the rest of Hailo's BERT
+    # alls recipe + iter-153 multiproc disable.
     bert_alls = """\
 model_optimization_config(calibration, batch_size=8, calibset_size=64)
 model_optimization_config(globals, multiproc_policy=disabled)

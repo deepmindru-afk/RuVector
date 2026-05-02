@@ -38,33 +38,32 @@ HIDDEN = 384
 
 
 class EncoderOnly(torch.nn.Module):
-    """Wraps BertEncoder taking hidden_states + softmax mask as inputs.
+    """Wraps BertEncoder taking only hidden_states (no mask input).
 
-    Iter 144 — adopts Hailo Model Zoo's official BERT pattern (see
-    cfg/networks/bert_base_uncased.yaml). They split the network at
-    /embeddings/Add_1 (post-embedding hidden states) AND the mask
-    broadcast intermediate, then use `set_input_mask_to_softmax()` in
-    the alls script to tell the SDK how to fold the mask into each
-    softmax. This bypasses the iter-139/142 SDK chain
-    (Where → KeyError → ElementwiseAddDirectOp deserialize) by going
-    through the SDK's well-tested transformer codepath.
+    Iter 156 — single-input form. The dual-input form from iter 144
+    fails at the allocator stage with
+    `tf_rgb_to_hailo_rgb format conversion ... features not aligned to 8`
+    on the rank-4 mask input (C=1, can't be aligned to 8). Hailo's
+    `input_conversion` script command only accepts image-color
+    conversions, not feature passthrough. Iter 153 fixed the original
+    blocker (Keras deserialize on ElementwiseAddDirectOp) so the
+    single-input form — which iter 144b tried before iter 153 —
+    should now compile cleanly.
 
-    Inputs:
-      hidden_states           [batch, seq, hidden]  float32 — host-computed embeddings
-      attention_softmax_mask  [batch, 1, 1, seq]    float32 — additive bias 0/-10000
-
-    The attention_softmax_mask is what gets added to the QK^T scores
-    pre-softmax in standard self-attention. Host computes it from the
-    [batch, seq] padding mask once, broadcasts to 4D, sends as input."""
+    Trade-off: encoder runs full attention with no padding mask. The
+    worker pads input to seq=128 with [PAD] tokens, so shorter inputs
+    just produce meaningful values at PAD positions; the post-NPU
+    host-side mean-pool applies the real attention mask, zeroing out
+    those PAD-position contributions. Same final embedding semantics."""
 
     def __init__(self, model):
         super().__init__()
         self.encoder = model.encoder
 
-    def forward(self, hidden_states, attention_softmax_mask):
+    def forward(self, hidden_states):
         out = self.encoder(
             hidden_states=hidden_states,
-            attention_mask=attention_softmax_mask,
+            attention_mask=None,
             return_dict=True,
         )
         return out.last_hidden_state
@@ -81,14 +80,13 @@ def main(out_dir: str) -> None:
 
     print(f"==> dummy inputs (batch=1, seq={SEQ_LEN}, hidden={HIDDEN})", flush=True)
     hidden_states = torch.randn(1, SEQ_LEN, HIDDEN)
-    attention_softmax_mask = torch.zeros(1, 1, 1, SEQ_LEN)
 
     print(f"==> torch.onnx.export → {onnx_path}", flush=True)
     torch.onnx.export(
         encoder_only,
-        (hidden_states, attention_softmax_mask),
+        (hidden_states,),
         str(onnx_path),
-        input_names=["hidden_states", "attention_softmax_mask"],
+        input_names=["hidden_states"],
         output_names=["last_hidden_state"],
         opset_version=OPSET,
         do_constant_folding=True,
