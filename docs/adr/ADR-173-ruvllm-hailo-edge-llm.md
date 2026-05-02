@@ -13,7 +13,35 @@ related: [ADR-167, ADR-169, ADR-171, ADR-172]
 
 ## Status
 
-Proposed. Companion to ADR-171 (brain + ruview + LoRa). Together
+**Host-side seam implemented** as of iter 125 (2026-05-02). Real LLM
+inference still requires HEF compile of the Llama-class prefill heads
+(vendor x86 host tooling — outside this repo's scope).
+
+| Iter | What landed |
+|---:|---|
+| 124 | New `ruvllm-bridge` bin under `crates/ruvector-hailo-cluster/src/bin/`. JSONL stdin/stdout adapter — any ruvllm process spawns it as a subprocess, sends `{"text":"..."}` lines, gets `{"dim":N,"latency_us":X,"vector":[...]}` lines back. Carries the request_id (ULID) through unchanged. Same TLS/mTLS/§2a flag set as iter-115's mmwave-bridge. ~260 LOC, hand-rolled JSON parser to keep the bin link surface small. |
+| 125 | 8 committed CLI integration tests in `tests/ruvllm_bridge_cli.rs`: single + multi-line + request_id propagation, blank-line skip, malformed-request error-line + continue, no-workers gate, §2a fp+cache gate, --help, --version. |
+
+**Why this seam exists today, before HEFs:** ruvllm processes that need
+RAG retrieval / context embedding don't want to link tonic. A thin
+local subprocess that takes JSON in and gives JSON out is the
+universal escape hatch — works from any language, drops cleanly into
+existing process trees, surfaces cluster errors as JSON lines without
+killing the bin. When the HEF compile pipeline lands and the cluster's
+`HailoEmbedder` serves real semantic vectors, this bridge's input/
+output contract doesn't change — same JSONL, just real embeddings.
+
+**Still unimplemented on this branch:**
+- LLM serving on the NPU itself (the Llama prefill heads). Requires:
+  1. Hailo Dataflow Compiler runs against Llama-class ONNX
+     (vendor tooling, x86 host, blocked)
+  2. New `crates/ruvllm-hailo/` (~1500 LOC) loading the HEFs,
+     driving the Cortex-A76 decode loop, exposing a streaming
+     gRPC API
+  3. Tokio integration for KV-cache management
+- MicroLoRA adapter swap mechanics (planned iter; needs HEF too).
+
+Companion to ADR-171 (brain + ruview + LoRa). Together
 171/173 define the four workloads sharing each Pi 5 + AI HAT+ edge node:
 
 ```

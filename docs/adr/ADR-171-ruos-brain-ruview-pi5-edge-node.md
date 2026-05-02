@@ -13,10 +13,37 @@ related: [ADR-167, ADR-168, ADR-169, ADR-170]
 
 ## Status
 
-Proposed — sketches the integration of three existing ruvnet artifacts
-onto the same Pi 5 + AI HAT+ node that currently hosts
-`ruvector-hailo-worker`. Builds on the cluster + cache + tracing work
-shipped in ADRs 167–170.
+**Partially implemented** as of iter 126 (2026-05-02). The ruview-side
+host integration is shipped end-to-end on this branch:
+
+| Iter | What landed |
+|---:|---|
+| 123 | New `ruview-csi-bridge` bin under `crates/ruvector-hailo-cluster/src/bin/`. Listens on UDP for RuView ADR-018 binary CSI frames (`0xC5110001` raw + `0xC5110006` feature-state magics), parses the 20-byte header, derives an NL description (node/channel/RSSI/noise/antennas/subcarriers), and posts via the cluster's embed RPC. Same TLS/mTLS/§2a flag set as iter-115's mmwave-bridge. |
+| 125 | 6 committed CLI integration tests in `tests/ruview_csi_bridge_cli.rs`: JSONL emission, cluster sink, §2a fp+cache gate, malformed-packet drop, --help, --version. |
+| 126 | Production deploy bundle: `ruview-csi-bridge.service` (hardened systemd unit running as `ruvector-csi`), `.env.example` config template, idempotent `install-ruview-csi-bridge.sh`. |
+
+**Architectural seam:** RuView's existing pipeline (separate
+`~/projects/RuView/` repo with ESP32 CSI firmware + Rust pointcloud
+binary) broadcasts ADR-018 frames over UDP. This branch's bridge
+consumes that stream and lifts each frame into the hailo-backend
+cluster's §1b mTLS-gated embed RPC. Downstream brain memories receive
+embeddings keyed off short NL strings — searchable like any other
+corpus fragment.
+
+**Still unimplemented in this branch:**
+- The ruOS brain side (mcp-brain client → pi.ruv.io) doesn't query
+  the cluster yet — brain-side change in `crates/mcp-brain-server/`,
+  separate scope.
+- LoRa transport (§7b in ADR-172) for off-Tailscale deploys uses
+  X25519 ECDH session keys; future iter, separate ADR territory.
+- Real WiFi DensePose pose extraction lives in the RuView repo
+  unchanged.
+
+Builds on the cluster + cache + tracing work shipped in ADRs 167–170.
+
+---
+
+(Original proposal text preserved below for historical context.)
 
 ## Context
 
