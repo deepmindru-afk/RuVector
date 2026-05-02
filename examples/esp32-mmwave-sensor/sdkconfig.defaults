@@ -1,0 +1,18 @@
+# Base sdkconfig defaults for ruvector-mmwave-sensor (iter A bring-up).
+# Per-variant tweaks live in `sdkconfig.defaults.<target>`.
+
+# Logging — INFO level surfaces presence/HR/BR events without flooding;
+# DEBUG bumps to per-byte parser tracing for first-attach debugging.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Stack — frame parser holds a 32-byte ring + a small payload buffer;
+# 16 KB is plenty.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# UART driver — esp-idf-hal's UartDriver expects this enabled.
+CONFIG_UART_ISR_IN_IRAM=y
+
+# Trim mbedtls (iter B will need TLS; keep tightly bounded for iter A
+# so the bring-up image stays small).
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
