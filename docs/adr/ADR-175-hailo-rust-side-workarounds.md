@@ -95,11 +95,20 @@ UnsupportedOperationError in op /encoder/layer.0/attention/self/key/MatMul_quant
   MatMulInteger operation is unsupported
 ```
 
-So the parser only accepts FP32 ONNX and expects to do its OWN
-quantization (which is the broken `_decompose_layer_norm` /
-`ElementwiseAddDirectOp` path). Possible follow-up: try
-`quantize_static` (produces `QLinearConv` / `QLinearMatMul`
-which are standard ONNX ops; Hailo might recognize those). Untested.
+**Iter 150 follow-up**: also tried `quantize_static` with
+`QuantFormat.QOperator` (produces standard `QLinearConv`,
+`QLinearMatMul`, `QLinearAdd`, `QuantizeLinear` ops). Hailo's parser
+**rejected those too**:
+```
+UnsupportedOperationError: QuantizeLinear operation is unsupported
+UnsupportedOperationError: QLinearMatMul operation is unsupported
+UnsupportedOperationError: QLinearAdd operation is unsupported
+```
+
+Hailo's parser **only accepts FP32 ONNX** and expects to do its own
+quantization internally (which is the broken `_decompose_layer_norm`
+/ `ElementwiseAddDirectOp` path). No format of pre-quantized ONNX
+gets past the parser. Option C is definitively closed.
 
 **Catch beyond the parser**: even if a quantized ONNX parses,
 `runner.compile()` checks the HN state and refuses non-quantized
@@ -113,8 +122,11 @@ but none were given" in iter 142b). We'd need to either:
 to understand the HN file format; may end up needing the same fix
 as Option A anyway.
 
-**Recommendation**: park until Option A timeline is clearer. Iter 149
-probe confirmed the parser-level blocker.
+**Recommendation**: **closed**, not parked. Both `quantize_dynamic`
+and `quantize_static` (QOperator) are rejected by the Hailo parser.
+The only path from FP32 ONNX to a quantized HEF is through
+`runner.optimize()` which hits the `ElementwiseAddDirectOp` Keras
+deserialize bug. Option A (Hailo SDK fix) is the unblocker.
 
 ### Option D — Use Hailo-8 for matrix multiplication ops only
 
