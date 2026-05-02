@@ -66,10 +66,27 @@ re-exported the BERT encoder block in isolation:
   quantized weights (full-precision HEF would be possible on
   hailo15h but not hailo8).
 
+**Iter 142/142b/143 follow-up debugging** (after reading the SDK source):
+- Root-caused the iter-139 `KeyError` to a mismatch between
+  `_get_build_inputs` (returns dict keyed by user dataset keys) and
+  `hailo_model.build` (looks up by internal `flow.input_nodes` names).
+  Workaround: introspect the parsed HN, key the calibration dict by
+  the actual layer name (`minilm_encoder/input_layer1`).
+- Past that: `AccelerasValueError` shape mismatch — Hailo's HN treats
+  inputs as 4D NCHW with implicit channels=1. Workaround: reshape
+  calibration from `[batch, seq, hidden]` to `[batch, 1, seq, hidden]`.
+- Past **that**: a Keras serialization bug —
+  `TypeError: Could not locate class 'ElementwiseAddDirectOp'` —
+  during the SDK's deepcopy of its own internal layer types. This is
+  hailo_model_optimization deepcopy-ing a custom Keras layer it
+  registered itself, then failing to deserialize it because the
+  `@register_keras_serializable` decorator isn't running in the
+  spawned subprocess. Cannot be fixed from user-space.
+
 **Status:** the encoder ONNX is fundamentally Hailo-compatible (it
-parses + full-precision-optimizes cleanly). The remaining gap is an
-SDK-internal bug in INT8 quantization of transformer encoders that
-can't be worked around from user-space. The cleanest unblock paths:
+parses + full-precision-optimizes cleanly). The remaining gap is a
+chain of SDK-internal bugs in INT8 quantization of transformer encoders
+that can't be worked around from user-space. The cleanest unblock paths:
 1. Hailo support ticket (the SDK should not KeyError on a layer it
    knows about — this is a quantization-flow bug, not a
    user-input bug)

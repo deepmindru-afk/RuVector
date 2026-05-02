@@ -337,8 +337,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fingerprint = compute_fingerprint(&model_dir);
     if fingerprint.is_empty() {
         warn!(
-            "model_dir {} has no model.hef / vocab.txt — fingerprint empty; \
-             coordinators will skip the integrity check",
+            "model_dir {} has no recognizable model artifacts \
+             (NPU: model.hef + vocab.txt; cpu-fallback: model.safetensors + \
+             tokenizer.json + config.json) — fingerprint empty; coordinators \
+             will skip the integrity check",
             model_dir.display()
         );
     } else {

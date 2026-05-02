@@ -1,29 +1,50 @@
-//! Model fingerprint — sha256 over HEF + tokenizer artifacts.
+//! Model fingerprint — sha256 over the model artifacts on disk.
 //!
 //! ADR-167 §8.3 fleet integrity guard: coordinators refuse to mix
 //! workers reporting different model fingerprints. Computed at worker
-//! startup over the files actually loaded, so any swap of HEF or
-//! vocab.txt produces a different fingerprint and the coordinator can
-//! eject the drift.
+//! startup over the files actually loaded, so any swap of model
+//! weights or tokenizer produces a different fingerprint and the
+//! coordinator can eject the drift.
 //!
-//! Format: hex-lowercase, 64 chars.
+//! Iter 143 — covers both deployment paths:
+//!   * NPU path:   sha256(model.hef || vocab.txt)
+//!   * cpu-fallback: sha256(model.safetensors || tokenizer.json || config.json)
+//!
+//! Mixed clusters (some workers on NPU, some on CPU) intentionally
+//! produce different fingerprints — they're running different code
+//! paths so the cluster should reject the mix.
+//!
+//! Format: hex-lowercase, 64 chars. Empty when no recognizable model
+//! artifacts are present in `model_dir`.
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Compute sha256 over (hef_bytes || vocab_bytes). Missing files are
-/// treated as empty so the fingerprint is *also* a witness of which
-/// files exist — a worker that loads only the HEF (no tokenizer)
-/// produces a different fingerprint than a worker with both.
+/// Compute sha256 over the model artifacts. Missing files are treated
+/// as empty within their layout so the fingerprint is *also* a witness
+/// of which files exist — a worker that loads only the HEF (no
+/// tokenizer) produces a different fingerprint than a worker with both.
 ///
-/// Returns "" when both files are missing — caller (worker startup)
-/// uses empty-string as "skip the check" sentinel until step 6 lands.
+/// Returns "" when neither layout has any recognizable file — caller
+/// (worker startup) uses empty-string as "skip the check" sentinel.
 pub fn compute_fingerprint(model_dir: &Path) -> String {
     let hef = std::fs::read(model_dir.join("model.hef")).unwrap_or_default();
     let vocab = std::fs::read(model_dir.join("vocab.txt")).unwrap_or_default();
-    if hef.is_empty() && vocab.is_empty() {
+
+    // Iter 143: cpu-fallback artifacts. We don't read the full
+    // safetensors (90 MB) into memory — sha256 it in streaming chunks.
+    let safetensors_present = model_dir.join("model.safetensors").exists();
+    let tokenizer_json = std::fs::read(model_dir.join("tokenizer.json")).unwrap_or_default();
+    let config_json = std::fs::read(model_dir.join("config.json")).unwrap_or_default();
+
+    let npu_layout_present = !hef.is_empty() || !vocab.is_empty();
+    let cpu_layout_present =
+        safetensors_present || !tokenizer_json.is_empty() || !config_json.is_empty();
+
+    if !npu_layout_present && !cpu_layout_present {
         return String::new();
     }
+
     let mut h = Sha256::new();
     // Length-prefix each input so a hef of N bytes + vocab of M bytes
     // never collides with a hef of N+M bytes + empty vocab.
@@ -31,6 +52,30 @@ pub fn compute_fingerprint(model_dir: &Path) -> String {
     h.update(&hef);
     h.update((vocab.len() as u64).to_le_bytes());
     h.update(&vocab);
+
+    // Stream-hash the safetensors so we don't read 90 MB into memory.
+    if safetensors_present {
+        // Tag with file marker so an empty hef doesn't blend with safetensors.
+        h.update(b"safetensors:");
+        if let Ok(mut f) = std::fs::File::open(model_dir.join("model.safetensors")) {
+            let mut buf = [0u8; 64 * 1024];
+            let mut total: u64 = 0;
+            use std::io::Read;
+            while let Ok(n) = f.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+                total += n as u64;
+            }
+            h.update(total.to_le_bytes());
+        }
+    }
+    h.update((tokenizer_json.len() as u64).to_le_bytes());
+    h.update(&tokenizer_json);
+    h.update((config_json.len() as u64).to_le_bytes());
+    h.update(&config_json);
+
     let digest = h.finalize();
     hex_lower(&digest)
 }
@@ -93,6 +138,37 @@ mod tests {
         std::fs::write(d.path().join("model.hef"), b"hef-B").unwrap();
         let fp3 = compute_fingerprint(d.path());
         assert_ne!(fp2, fp3);
+    }
+
+    #[test]
+    fn cpu_fallback_safetensors_layout_yields_distinct_fingerprint() {
+        // Iter 143: a worker with safetensors+tokenizer+config but no
+        // hef must produce a non-empty fingerprint, distinct from a
+        // worker with the same files but different content.
+        let d1 = tmpdir();
+        std::fs::write(d1.path().join("model.safetensors"), b"weights-A").unwrap();
+        std::fs::write(d1.path().join("tokenizer.json"), b"tok-A").unwrap();
+        std::fs::write(d1.path().join("config.json"), b"cfg-A").unwrap();
+        let fp1 = compute_fingerprint(d1.path());
+        assert_eq!(fp1.len(), 64);
+        assert!(!fp1.is_empty());
+
+        let d2 = tmpdir();
+        std::fs::write(d2.path().join("model.safetensors"), b"weights-B").unwrap();
+        std::fs::write(d2.path().join("tokenizer.json"), b"tok-A").unwrap();
+        std::fs::write(d2.path().join("config.json"), b"cfg-A").unwrap();
+        let fp2 = compute_fingerprint(d2.path());
+        assert_ne!(fp1, fp2, "different safetensors must yield different fp");
+
+        // Per ADR-167 §8.3, an NPU-layout worker and a cpu-fallback
+        // worker run different code paths so their fingerprints SHOULD
+        // differ even with the same logical model — the cluster will
+        // refuse to mix them.
+        let d3 = tmpdir();
+        std::fs::write(d3.path().join("model.hef"), b"weights-A").unwrap();
+        std::fs::write(d3.path().join("vocab.txt"), b"tok-A").unwrap();
+        let fp3 = compute_fingerprint(d3.path());
+        assert_ne!(fp1, fp3, "NPU layout vs cpu-fallback must differ");
     }
 
     #[test]
