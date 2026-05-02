@@ -67,6 +67,60 @@ impl HailoDevice {
     pub fn version(&self) -> Option<(u32, u32, u32)> {
         hailort_sys::version_triple()
     }
+
+    /// Read the on-die NPU temperature(s) from the Hailo-8 chip.
+    /// Returns `(ts0_celsius, ts1_celsius)` — two thermal sensors per
+    /// die. Iter 95 deliverable from ADR-174 §93 (NPU sensor read).
+    ///
+    /// Implementation: walks the vdevice's physical devices via
+    /// `hailo_get_physical_devices`, then calls
+    /// `hailo_get_chip_temperature` on the first one. Returns `None`
+    /// if either call fails or if the feature is disabled.
+    ///
+    /// **Without the `hailo` feature** this always returns `None` so
+    /// the rest of the crate compiles on non-Pi developer machines.
+    pub fn chip_temperature(&self) -> Option<(f32, f32)> {
+        #[cfg(feature = "hailo")]
+        {
+            use std::ptr;
+
+            // Step 1: enumerate the physical devices behind this vdevice.
+            // Pi 5 + AI HAT+ has exactly one (the Hailo-8 over PCIe).
+            let mut count: usize = 8;
+            let mut handles: [hailort_sys::hailo_device; 8] =
+                [ptr::null_mut(); 8];
+            let status = unsafe {
+                hailort_sys::hailo_get_physical_devices(
+                    self.handle,
+                    handles.as_mut_ptr(),
+                    &mut count as *mut _,
+                )
+            };
+            if status != 0 || count == 0 || handles[0].is_null() {
+                return None;
+            }
+            // Step 2: read the temperature info from device 0.
+            let mut info = hailort_sys::hailo_chip_temperature_info_t {
+                ts0_temperature: 0.0,
+                ts1_temperature: 0.0,
+                sample_count: 0,
+            };
+            let status = unsafe {
+                hailort_sys::hailo_get_chip_temperature(
+                    handles[0],
+                    &mut info as *mut _,
+                )
+            };
+            if status != 0 {
+                return None;
+            }
+            Some((info.ts0_temperature, info.ts1_temperature))
+        }
+        #[cfg(not(feature = "hailo"))]
+        {
+            None
+        }
+    }
 }
 
 #[cfg(feature = "hailo")]

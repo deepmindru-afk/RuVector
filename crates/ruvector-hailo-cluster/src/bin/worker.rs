@@ -263,6 +263,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let device_id = embedder.device_id().to_string();
 
+    // Iter 95 (ADR-174 §93): log the NPU on-die temperature once at
+    // startup so operators see baseline thermal state without polling.
+    // Hailo-8 has two thermal sensors per die; we log both. None means
+    // the read failed (firmware unsupported on this board variant); the
+    // `ruvector-hailo-stats` integration in iter 96 surfaces it
+    // continuously via the Health RPC.
+    match embedder.chip_temperature() {
+        Some((ts0, ts1)) => {
+            info!(
+                ts0_celsius = ts0,
+                ts1_celsius = ts1,
+                "Hailo-8 NPU on-die temperature at startup"
+            );
+        }
+        None => {
+            // Soft warn — older Hailo firmware doesn't expose the
+            // temperature opcode; not a startup-blocking issue.
+            tracing::warn!("Hailo-8 NPU temperature read returned None (firmware may not support the opcode)");
+        }
+    }
+
     let svc = WorkerService {
         embedder: Arc::new(embedder),
         version: format!("ruvector-hailo-worker {}", env!("CARGO_PKG_VERSION")),

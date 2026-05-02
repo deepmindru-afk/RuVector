@@ -41,11 +41,14 @@ pub struct HailoEmbedder {
     name: String,
     /// PCIe BDF of the underlying device once opened, e.g. `0001:01:00.0`.
     device_id: String,
-    /// Internal handle bundle. The actual fields land in iterations 4-7
-    /// (Mutex<DeviceHandle>, Mutex<NetworkGroup>, Mutex<VStreams>, etc.).
-    /// Keeping `_inner: Mutex<()>` reserves the interior-mutability slot
-    /// without committing to the layout yet.
-    _inner: Mutex<()>,
+    /// Held-open vdevice handle. Iter-95: kept across the embedder's
+    /// lifetime so `chip_temperature()` can read the on-die NPU
+    /// thermal sensors without re-opening (which is expensive — each
+    /// `hailo_create_vdevice` does a firmware handshake).
+    /// Wrapped in `Mutex` so concurrent reads serialize safely; the
+    /// libhailort vdevice is documented thread-safe for inference but
+    /// thermal reads + future config writes still want serial access.
+    device: Mutex<crate::device::HailoDevice>,
 }
 
 impl HailoEmbedder {
@@ -99,8 +102,26 @@ impl HailoEmbedder {
                         .unwrap_or("unknown-model")
                 ),
                 device_id,
-                _inner: Mutex::new(()),
+                device: Mutex::new(device),
             })
+        }
+    }
+
+    /// Read the on-die NPU temperature(s) from the held-open vdevice.
+    /// Returns `(ts0_celsius, ts1_celsius)` — Hailo-8 has two thermal
+    /// sensors on the chip. `None` if the read failed (cluster
+    /// callers treat that as "skip the npu_temp gauge for this tick").
+    ///
+    /// Iter 95 deliverable from ADR-174 §93.
+    pub fn chip_temperature(&self) -> Option<(f32, f32)> {
+        #[cfg(not(feature = "hailo"))]
+        {
+            None
+        }
+        #[cfg(feature = "hailo")]
+        {
+            let g = self.device.lock().unwrap_or_else(|p| p.into_inner());
+            g.chip_temperature()
         }
     }
 
@@ -128,7 +149,12 @@ impl HailoEmbedder {
             // Hold the lock for the duration of one embed — preserves the
             // contract that future HEF-based inference will need single-
             // writer access to the vstream descriptors.
-            let _guard = self._inner.lock().unwrap_or_else(|p| p.into_inner());
+            // Hold the device lock — preserves the contract that future
+            // HEF-based inference will need single-writer access to the
+            // vstream descriptors (currently the placeholder hash path
+            // doesn't strictly need it but the lock acquisition is
+            // cheap and keeps the API contract stable across the swap).
+            let _guard = self.device.lock().unwrap_or_else(|p| p.into_inner());
 
             let dim = self.dimensions.max(1);
             let mut v = vec![0.0_f32; dim];
