@@ -47,6 +47,23 @@ jobs:
         # on the `hailo` feature which CI can't build without libhailort).
         run: cargo audit --deny warnings
 
+  deny:
+    name: cargo-deny (license + bans + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: Run cargo deny check
+        working-directory: crates/ruvector-hailo-cluster
+        # Reads deny.toml at the crate root (committed iter 92).
+        # Targets x86_64 + aarch64 deploys; allowlist of MIT/Apache/BSD/
+        # ISC licenses; denies wildcards + unknown registries + unknown
+        # git sources. Iter 98: now wired into CI.
+        run: cargo deny --log-level error check
+
   clippy:
     name: clippy --all-targets -D warnings (cluster)
     runs-on: ubuntu-latest
