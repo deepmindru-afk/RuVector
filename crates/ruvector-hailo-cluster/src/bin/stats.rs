@@ -235,7 +235,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         } else {
-            println!("worker\taddress\tfingerprint\tnpu_t0\tnpu_t1\tembeds\terrors\tavg_us\tmax_us\tup_s");
+            // Iter-105: TSV gains `rl_denials` + `rl_peers` columns. New
+            // columns are appended to the right so existing scripts that
+            // index by column number keep working through the upgrade.
+            println!("worker\taddress\tfingerprint\tnpu_t0\tnpu_t1\tembeds\terrors\tavg_us\tmax_us\tup_s\trl_denials\trl_peers");
             for m in &snapshots {
                 let fp = m.fingerprint.as_deref().unwrap_or("?");
                 let t0 = m.npu_temp_ts0_celsius
@@ -247,10 +250,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let avg_us = s.average_latency().map(|d| d.as_micros() as u64).unwrap_or(0);
                         let max_us = s.latency_max.map(|d| d.as_micros() as u64).unwrap_or(0);
                         println!(
-                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                             m.endpoint.name, m.endpoint.address, fp, t0, t1,
                             s.embed_count, s.error_count,
                             avg_us, max_us, s.uptime.as_secs(),
+                            s.rate_limit_denials, s.rate_limit_tracked_peers,
                         );
                     }
                     Err(e) => {
@@ -338,21 +342,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Emit the HELP/TYPE preamble for the Prometheus output.
 /// Single block at start so the textfile-collector can scrape it efficiently.
 fn emit_prom_header() {
-    let lines = [
-        ("ruvector_embed_count_total",       "Successful embed RPCs since worker boot.",                        "counter"),
-        ("ruvector_error_count_total",       "Failed embed RPCs since worker boot.",                            "counter"),
-        ("ruvector_health_count_total",      "Health probes received since worker boot.",                       "counter"),
-        ("ruvector_latency_microseconds_sum","Cumulative microseconds spent in successful embed RPCs.",         "counter"),
-        ("ruvector_latency_microseconds_min","Smallest microsecond latency observed since boot.",               "gauge"),
-        ("ruvector_latency_microseconds_max","Largest microsecond latency observed since boot.",                "gauge"),
-        ("ruvector_uptime_seconds",          "Seconds since worker process started.",                           "gauge"),
-        ("ruvector_npu_temp_celsius",        "Hailo-8 on-die thermal sensor reading (sensor=ts0|ts1).",         "gauge"),
-    ];
-    for (name, help, kind) in lines {
+    for (name, help, kind) in PROM_METRIC_DEFS {
         println!("# HELP {} {}", name, help);
         println!("# TYPE {} {}", name, kind);
     }
 }
+
+/// Single source of truth for the textfile-collector metric catalogue.
+/// Iter-105: added `ruvector_rate_limit_*` for ADR-172 §3b visibility.
+const PROM_METRIC_DEFS: &[(&str, &str, &str)] = &[
+    ("ruvector_embed_count_total",       "Successful embed RPCs since worker boot.",                        "counter"),
+    ("ruvector_error_count_total",       "Failed embed RPCs since worker boot.",                            "counter"),
+    ("ruvector_health_count_total",      "Health probes received since worker boot.",                       "counter"),
+    ("ruvector_latency_microseconds_sum","Cumulative microseconds spent in successful embed RPCs.",         "counter"),
+    ("ruvector_latency_microseconds_min","Smallest microsecond latency observed since boot.",               "gauge"),
+    ("ruvector_latency_microseconds_max","Largest microsecond latency observed since boot.",                "gauge"),
+    ("ruvector_uptime_seconds",          "Seconds since worker process started.",                           "gauge"),
+    ("ruvector_npu_temp_celsius",        "Hailo-8 on-die thermal sensor reading (sensor=ts0|ts1).",         "gauge"),
+    ("ruvector_rate_limit_denials_total","ResourceExhausted returned by the per-peer rate limiter.",        "counter"),
+    ("ruvector_rate_limit_tracked_peers","Distinct peers seen by the rate limiter since boot.",             "gauge"),
+];
 
 /// Emit one row per metric for a worker. Fingerprint goes on every row
 /// as a label so PromQL filters like `{fingerprint="fp:current"}` work
@@ -394,23 +403,24 @@ fn emit_prom_row(
             name, address, fingerprint, t
         );
     }
+    // Iter-105 (ADR-172 §3b follow-up): rate-limiter visibility. Always
+    // emit (even when 0/0) so PromQL alerts on a *change* don't have to
+    // discriminate between "metric missing" and "metric present at 0".
+    println!(
+        "ruvector_rate_limit_denials_total{} {}",
+        labels, s.rate_limit_denials
+    );
+    println!(
+        "ruvector_rate_limit_tracked_peers{} {}",
+        labels, s.rate_limit_tracked_peers
+    );
 }
 
 /// String version of `emit_prom_header` so the file path can build the
 /// whole document in memory before atomic write.
 fn prom_header_string() -> String {
-    let lines = [
-        ("ruvector_embed_count_total",       "Successful embed RPCs since worker boot.",                        "counter"),
-        ("ruvector_error_count_total",       "Failed embed RPCs since worker boot.",                            "counter"),
-        ("ruvector_health_count_total",      "Health probes received since worker boot.",                       "counter"),
-        ("ruvector_latency_microseconds_sum","Cumulative microseconds spent in successful embed RPCs.",         "counter"),
-        ("ruvector_latency_microseconds_min","Smallest microsecond latency observed since boot.",               "gauge"),
-        ("ruvector_latency_microseconds_max","Largest microsecond latency observed since boot.",                "gauge"),
-        ("ruvector_uptime_seconds",          "Seconds since worker process started.",                           "gauge"),
-        ("ruvector_npu_temp_celsius",        "Hailo-8 on-die thermal sensor reading (sensor=ts0|ts1).",         "gauge"),
-    ];
     let mut s = String::new();
-    for (name, help, kind) in lines {
+    for (name, help, kind) in PROM_METRIC_DEFS {
         s.push_str(&format!("# HELP {} {}\n", name, help));
         s.push_str(&format!("# TYPE {} {}\n", name, kind));
     }
@@ -472,6 +482,15 @@ fn prom_row_string(
             name, address, fingerprint, t
         ));
     }
+    // Iter-105: rate-limiter visibility (mirrors emit_prom_row).
+    out.push_str(&format!(
+        "ruvector_rate_limit_denials_total{} {}\n",
+        labels, s.rate_limit_denials
+    ));
+    out.push_str(&format!(
+        "ruvector_rate_limit_tracked_peers{} {}\n",
+        labels, s.rate_limit_tracked_peers
+    ));
     out
 }
 

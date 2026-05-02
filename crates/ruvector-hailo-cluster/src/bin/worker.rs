@@ -116,6 +116,13 @@ struct WorkerService {
     fingerprint: String,
     /// ADR-172 §3c iter-103 audit-log mode for embed text content.
     log_text_content: LogTextContent,
+    /// ADR-172 §3b iter-104/105: optional per-peer rate limiter. Read
+    /// here so `get_stats` can surface `tracked_peers()` without holding
+    /// a separate Arc.
+    rate_limiter: Arc<Option<RateLimiter>>,
+    /// Iter-105: shared denial counter — bumped by the interceptor
+    /// closure on every Status::resource_exhausted, read by `get_stats`.
+    rate_limit_denials: Arc<AtomicU64>,
     /// Process start time, for uptime reporting in GetStats.
     start: Instant,
     /// Atomic counters surfaced via GetStats.
@@ -262,6 +269,15 @@ impl Embedding for WorkerService {
         _request: Request<StatsRequest>,
     ) -> Result<Response<StatsResponse>, Status> {
         let min = self.latency_min_us.load(Ordering::Relaxed);
+        // Iter-105: when the rate limiter is disabled (None), tracked
+        // peers is reported as 0 — same as "no peers ever observed",
+        // which is what the operator wants to see.
+        let tracked_peers = self
+            .rate_limiter
+            .as_ref()
+            .as_ref()
+            .map(|l| l.tracked_peers() as u64)
+            .unwrap_or(0);
         Ok(Response::new(StatsResponse {
             embed_count: self.embed_ok.load(Ordering::Relaxed),
             error_count: self.embed_err.load(Ordering::Relaxed),
@@ -270,6 +286,8 @@ impl Embedding for WorkerService {
             latency_us_min: if min == u64::MAX { 0 } else { min },
             latency_us_max: self.latency_max_us.load(Ordering::Relaxed),
             uptime_seconds: self.start.elapsed().as_secs(),
+            rate_limit_denials: self.rate_limit_denials.load(Ordering::Relaxed),
+            rate_limit_tracked_peers: tracked_peers,
         }))
     }
 }
@@ -380,6 +398,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if rate_limiter.is_some() {
         info!("per-peer rate limiter enabled (ADR-172 §3b iter 104)");
     }
+    // Iter-105: shared denial counter. Cloned into the interceptor +
+    // the WorkerService; both run on the same tokio runtime so
+    // Arc<AtomicU64> is the cheapest correct sharing.
+    let rate_limit_denials = Arc::new(AtomicU64::new(0));
 
     let svc = WorkerService {
         embedder: Arc::new(embedder),
@@ -387,6 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_id,
         fingerprint,
         log_text_content,
+        rate_limiter: Arc::clone(&rate_limiter),
+        rate_limit_denials: Arc::clone(&rate_limit_denials),
         start: Instant::now(),
         embed_ok: AtomicU64::new(0),
         embed_err: AtomicU64::new(0),
@@ -438,6 +462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Always install the interceptor; it's a no-op when the limiter
         // is None. Avoids type-divergence between enabled/disabled arms.
         let rl = Arc::clone(&rate_limiter);
+        let denials = Arc::clone(&rate_limit_denials);
         // `Status` weighs ~176 bytes, which trips clippy's
         // result_large_err on the closure return type. We can't
         // change tonic's signature, so allow it locally.
@@ -446,6 +471,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(limiter) = rl.as_ref() {
                 let peer = peer_identity(&req);
                 if limiter.check(&peer).is_err() {
+                    // Iter-105: bump the shared counter so get_stats
+                    // surfaces denial pressure without operators having
+                    // to grep the worker's stderr.
+                    denials.fetch_add(1, Ordering::Relaxed);
                     return Err(Status::resource_exhausted(format!(
                         "rate limit exceeded for {} (ADR-172 §3b)",
                         peer

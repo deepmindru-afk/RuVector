@@ -313,6 +313,8 @@ impl EmbeddingTransport for GrpcTransport {
                     Some(Duration::from_micros(resp.latency_us_max))
                 },
                 uptime:       Duration::from_secs(resp.uptime_seconds),
+                rate_limit_denials: resp.rate_limit_denials,
+                rate_limit_tracked_peers: resp.rate_limit_tracked_peers,
             })
         })
     }

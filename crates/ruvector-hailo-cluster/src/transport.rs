@@ -132,6 +132,15 @@ pub struct StatsSnapshot {
     /// Serialised as seconds (uptime is naturally coarse).
     #[serde(serialize_with = "serialize_duration_secs")]
     pub uptime: std::time::Duration,
+    /// Iter-105 (ADR-172 §3b follow-up): cumulative count of
+    /// `Status::resource_exhausted` returned by the worker's rate-limit
+    /// interceptor. 0 = limiter disabled or no denials yet.
+    #[serde(default)]
+    pub rate_limit_denials: u64,
+    /// Distinct peers (mTLS cert hashes or IPs) the limiter has seen
+    /// since boot. 0 = limiter disabled.
+    #[serde(default)]
+    pub rate_limit_tracked_peers: u64,
 }
 
 fn serialize_duration_us<S: serde::Serializer>(

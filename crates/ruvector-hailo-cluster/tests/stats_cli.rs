@@ -80,6 +80,64 @@ fn stats_cli_json_output_includes_fingerprint_field() {
 }
 
 #[test]
+fn stats_cli_tsv_includes_rate_limit_columns() {
+    // Iter-105 (ADR-172 §3b follow-up): rl_denials + rl_peers must
+    // surface in the default TSV. Fakeworker reports 0 for both
+    // (limiter not exercised), but the columns are present.
+    let port = free_port();
+    let mut worker = spawn_fakeworker(port, 4, "fp:rl");
+
+    let out = Command::new(STATS)
+        .args(["--workers", &format!("127.0.0.1:{}", port)])
+        .output()
+        .expect("run stats");
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].contains("rl_denials"), "header should include rl_denials: {}", lines[0]);
+    assert!(lines[0].contains("rl_peers"), "header should include rl_peers: {}", lines[0]);
+    let cols: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(cols.len(), 12, "expected 12 columns in TSV row, got {}: {:?}", cols.len(), cols);
+    // Last two columns are u64 — must parse cleanly.
+    assert!(cols[10].parse::<u64>().is_ok(), "rl_denials should be u64: {:?}", cols[10]);
+    assert!(cols[11].parse::<u64>().is_ok(), "rl_peers should be u64: {:?}", cols[11]);
+}
+
+#[test]
+fn stats_cli_prom_output_includes_rate_limit_metrics() {
+    let port = free_port();
+    let mut worker = spawn_fakeworker(port, 4, "fp:rl-prom");
+
+    let out = Command::new(STATS)
+        .args(["--workers", &format!("127.0.0.1:{}", port), "--prom"])
+        .output()
+        .expect("run stats");
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ruvector_rate_limit_denials_total"),
+        "prom output missing denials metric: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ruvector_rate_limit_tracked_peers"),
+        "prom output missing tracked_peers metric: {}",
+        stdout
+    );
+    // HELP/TYPE sections should also document them.
+    assert!(stdout.contains("# HELP ruvector_rate_limit_denials_total"));
+    assert!(stdout.contains("# TYPE ruvector_rate_limit_tracked_peers gauge"));
+}
+
+#[test]
 fn stats_cli_strict_homogeneous_with_drift_exits_three() {
     // Two workers, different fingerprints — drift detected.
     // --strict-homogeneous turns drift into exit 3.

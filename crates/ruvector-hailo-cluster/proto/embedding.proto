@@ -89,4 +89,10 @@ message StatsResponse {
   uint64 latency_us_max       = 6;  // since boot
   // Wall-clock seconds since the worker process started.
   uint64 uptime_seconds       = 7;
+  // Iter-105 (ADR-172 §3b follow-up): per-peer rate limiter visibility.
+  // 0 means the limiter is disabled (RUVECTOR_RATE_LIMIT_RPS unset/0)
+  // or no denials have happened. Coordinator-side stats CLI surfaces
+  // both as Prometheus gauges so a sudden spike in denials is grep-able.
+  uint64 rate_limit_denials       = 8;  // ResourceExhausted returned since boot
+  uint64 rate_limit_tracked_peers = 9;  // distinct peers seen since boot
 }
