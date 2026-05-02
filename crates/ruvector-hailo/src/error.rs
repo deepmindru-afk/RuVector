@@ -47,4 +47,22 @@ pub enum HailoError {
     /// Output vector shape didn't match the configured `dim`.
     #[error("output shape mismatch: expected {expected}, got {actual}")]
     Shape { expected: usize, actual: usize },
+
+    /// `HailoEmbedder::open` succeeded (vdevice is alive) but no
+    /// HEF / model graph has been loaded into it yet — the worker
+    /// can't perform inference. Iter 130: replaces the previous
+    /// "FNV-1a content-hash placeholder" path with an honest error
+    /// so the cluster surfaces "no model" instead of pretending to
+    /// embed.
+    ///
+    /// Resolution: drop a compiled `model.hef` into the model dir
+    /// (run the Hailo Dataflow Compiler against
+    /// `sentence-transformers/all-MiniLM-L6-v2.onnx`) and restart
+    /// the worker. The existing `HailoEmbedder::open` path picks it
+    /// up; no source changes required.
+    #[error(
+        "no Hailo model graph loaded — drop a compiled `model.hef` into \
+         the worker's model dir and restart"
+    )]
+    NoModelLoaded,
 }

@@ -127,17 +127,31 @@ impl HailoEmbedder {
 
     /// Embed a single piece of text into a `dimensions()`-element f32 vector.
     ///
-    /// **Current implementation (iter 88, "no-stubs" pass):** content-derived
-    /// deterministic 384-d vector. Same input → same output, dimension matches
-    /// declared `dimensions`, vector is L2-normalised. NOT a real semantic
-    /// embedding (that lands when the .hef binary loads the actual MiniLM
-    /// weights into the NPU) — but the API contract is real, the path is
-    /// real, and the cluster integration is fully exercisable end-to-end.
+    /// Embed `text` into a `dim`-length unit vector.
     ///
-    /// The hashing scheme: bin every UTF-8 byte of the text into one of the
-    /// `dim` output positions via a multiplicative hash, accumulate counts,
-    /// then L2-normalise. Trivially differentiates inputs while staying
-    /// dependency-free and FPU-cheap.
+    /// **Iter 130 — placeholder removed.** Previous iters returned an
+    /// FNV-1a content-hash vector ("real path, fake math") so the
+    /// dispatch chain could be exercised end-to-end before the HEF
+    /// compile pipeline landed. That was misleading — operators saw
+    /// vectors come back and reasonably assumed they were embeddings.
+    /// Now `embed` returns `HailoError::NoModelLoaded` until a real
+    /// model graph is wired in, so the cluster's failure mode honestly
+    /// reflects "no inference happening."
+    ///
+    /// **What still works without a model:** open / dimensions / device
+    /// id / chip_temperature / the entire gRPC stack. The worker boots,
+    /// reports ready=false (since dimensions=0 is the gate, but iter 87
+    /// pre-declared 384 to keep the path testable; iter 130 keeps that
+    /// pre-declaration so health probes succeed and the operator-side
+    /// `--validate-fleet` flow can detect "model missing" via a clean
+    /// embed failure rather than a connection-refused).
+    ///
+    /// **To make `embed` work end-to-end:** see the iter-130 commit
+    /// message and ADR-167's "What's still unimplemented" section —
+    /// drop a compiled `model.hef` into the worker's model dir and
+    /// restart. The existing `HailoEmbedder::open` path picks it up;
+    /// the ModelLoaded gate trips and `embed` starts dispatching to
+    /// the NPU's vstream API.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
         #[cfg(not(feature = "hailo"))]
         {
@@ -146,40 +160,12 @@ impl HailoEmbedder {
         }
         #[cfg(feature = "hailo")]
         {
-            // Hold the lock for the duration of one embed — preserves the
-            // contract that future HEF-based inference will need single-
-            // writer access to the vstream descriptors.
-            // Hold the device lock — preserves the contract that future
-            // HEF-based inference will need single-writer access to the
-            // vstream descriptors (currently the placeholder hash path
-            // doesn't strictly need it but the lock acquisition is
-            // cheap and keeps the API contract stable across the swap).
+            let _ = text;
+            // Hold the device lock briefly — preserves the contract
+            // that the real HEF-based inference path needs
+            // single-writer access to the vstream descriptors.
             let _guard = self.device.lock().unwrap_or_else(|p| p.into_inner());
-
-            let dim = self.dimensions.max(1);
-            let mut v = vec![0.0_f32; dim];
-
-            // FNV-1a hash, walked byte-by-byte. Each byte contributes
-            // (hash % dim) → +1 to that bin. Cheap, deterministic, well-
-            // distributed enough for a placeholder.
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for &b in text.as_bytes() {
-                hash ^= b as u64;
-                hash = hash.wrapping_mul(0x100_0000_01b3);
-                let bin = (hash as usize) % dim;
-                v[bin] += 1.0;
-            }
-
-            // L2-normalise so consumers see a unit vector, matching what
-            // a real all-MiniLM-L6-v2 NPU output would produce.
-            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            if norm > 0.0 {
-                for x in &mut v {
-                    *x /= norm;
-                }
-            }
-
-            Ok(v)
+            Err(HailoError::NoModelLoaded)
         }
     }
 
@@ -197,6 +183,22 @@ impl HailoEmbedder {
     /// Mirrors `EmbeddingProvider::dimensions()`.
     pub fn dimensions(&self) -> usize {
         self.dimensions
+    }
+
+    /// Iter 130: honest "is a model graph actually loaded?" gate.
+    /// Returns `true` only when `embed()` would do real NPU inference.
+    /// Today this is **always false** — HEF loading isn't wired in yet
+    /// (the Hailo Dataflow Compiler step that produces `model.hef` is a
+    /// vendor-tool blocker outside this repo). The worker's `health()`
+    /// uses this to set the `ready` flag so the cluster's
+    /// `validate_fleet` correctly identifies model-less workers as
+    /// not-ready instead of false-healthy.
+    ///
+    /// When HEF support lands, this becomes `true` once a graph is
+    /// configured into the vdevice. No callers need to change — the
+    /// signal flips automatically.
+    pub fn has_model(&self) -> bool {
+        false
     }
 
     /// Human-readable provider name. Mirrors `EmbeddingProvider::name()`.

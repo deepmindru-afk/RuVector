@@ -195,13 +195,13 @@ impl Embedding for WorkerService {
             version: self.version.clone(),
             device_id: self.device_id.clone(),
             model_fingerprint: self.fingerprint.clone(),
-            // Worker is "ready" iff embedder.dimensions() returned a real
-            // dim. Iter 87+: open() pre-declares MINI_LM_DIM = 384 so the
-            // worker reports ready=true and the coordinator dispatches
-            // even before the .hef lands (FNV-1a placeholder vectors).
-            // When HEF wiring lands the dim will come from the loaded
-            // network group's output shape instead.
-            ready: self.embedder.dimensions() > 0,
+            // Iter 130: ready iff a real model graph is loaded. The
+            // dimension pre-declaration (384) is no longer enough —
+            // it lied while the placeholder embed path was active.
+            // Now `has_model()` returns false until HEF support lands,
+            // so coordinators correctly see model-less workers as
+            // not-ready and skip them in validate_fleet / dispatch.
+            ready: self.embedder.dimensions() > 0 && self.embedder.has_model(),
             // Iter-96 (ADR-174 §93): live NPU temperature read on every
             // health probe. 0.0 if read fails (older firmware variants
             // don't expose the opcode); coordinator side maps 0.0 → None.

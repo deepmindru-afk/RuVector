@@ -109,8 +109,42 @@ impl WordPieceTokenizer {
         max_seq: usize,
         pad_to_max_seq: bool,
     ) -> EncodedInput {
+        // Iter 130 fix: degenerate `max_seq` values used to produce
+        // outputs that violated the `len <= max_seq` invariant. The
+        // proptest `output_length_respects_max_seq` flushed it out
+        // with `max_seq=1, text=""` → `[CLS][SEP]` (length 2). Now:
+        //
+        //   max_seq == 0  → empty (no room for anything)
+        //   max_seq == 1  → just [CLS]   (no room for [SEP])
+        //   max_seq >= 2  → [CLS] … [SEP]  (the normal path)
+        //
+        // pad_to_max_seq still honoured at any size.
+        if max_seq == 0 {
+            let attention = if pad_to_max_seq { Vec::new() } else { Vec::new() };
+            return EncodedInput {
+                input_ids: Vec::new(),
+                attention_mask: attention,
+                actual_len: 0,
+            };
+        }
+
         let mut ids = Vec::with_capacity(max_seq);
         ids.push(self.cls_id);
+
+        if max_seq == 1 {
+            // Only room for [CLS]. Skip body + [SEP].
+            let actual_len = ids.len();
+            let mut attention = vec![1u32; actual_len];
+            if pad_to_max_seq {
+                ids.resize(max_seq, self.pad_id);
+                attention.resize(max_seq, 0);
+            }
+            return EncodedInput {
+                input_ids: ids,
+                attention_mask: attention,
+                actual_len,
+            };
+        }
 
         for basic in basic_tokenize(text) {
             let pieces = self.wordpiece(&basic);

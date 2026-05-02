@@ -31,6 +31,7 @@ below for historical context. The current cumulative state:
 | ULID request IDs | Iter 109 — 26-char Crockford base32 |
 | Cache TTL exposed in stats | Iter 108 |
 | HEF compile pipeline (real semantic vectors) | ❌ External blocker — Hailo Dataflow Compiler is proprietary x86-host tooling, runs outside this repo |
+| **Placeholder vectors removed (iter 130)** | ✅ `embed()` now returns `HailoError::NoModelLoaded` instead of FNV-1a content hashes; `health.ready` flips false via the new `HailoEmbedder::has_model()` gate so the cluster's `validate_fleet` correctly identifies model-less workers |
 | ADR-174 thermal subscriber Unix-socket protocol | ❌ Deferred (iter 95-97 plan never built) |
 | Long-running coordinator daemon | ❌ Not built — CLI bins are stateless |
 | Native AsyncEmbeddingTransport trait | ❌ Public API change deferred (no consumer demand yet) |
