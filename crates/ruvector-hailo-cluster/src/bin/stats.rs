@@ -32,6 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut workers_arg: Option<String> = None;
     let mut workers_file_arg: Option<String> = None;
+    // ADR-172 §1c iter-107 — see embed.rs for the rationale.
+    let mut workers_file_sig: Option<String> = None;
+    let mut workers_file_pubkey: Option<String> = None;
     let mut tag_arg: Option<String> = None;
     let mut port_arg: u16 = 50051;
     let mut json_output = false;
@@ -50,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--workers" => { workers_arg = args.get(i + 1).cloned(); i += 2; }
             "--workers-file" => { workers_file_arg = args.get(i + 1).cloned(); i += 2; }
+            "--workers-file-sig" => { workers_file_sig = args.get(i + 1).cloned(); i += 2; }
+            "--workers-file-pubkey" => { workers_file_pubkey = args.get(i + 1).cloned(); i += 2; }
             "--tailscale-tag" => { tag_arg = args.get(i + 1).cloned(); i += 2; }
             "--port" => {
                 port_arg = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50051);
@@ -104,7 +109,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect();
             Box::new(StaticDiscovery::new(workers))
         }
-        (None, Some(path), None) => Box::new(FileDiscovery::new(path)),
+        (None, Some(path), None) => {
+            let mut fd = FileDiscovery::new(path);
+            match (&workers_file_sig, &workers_file_pubkey) {
+                (Some(s), Some(p)) => fd = fd.with_signature(s, p),
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        "--workers-file-sig and --workers-file-pubkey must both be set or both unset (ADR-172 §1c)"
+                            .into(),
+                    );
+                }
+                (None, None) => {}
+            }
+            Box::new(fd)
+        }
         (None, None, Some(tag)) => Box::new(TailscaleDiscovery::new(tag, port_arg)),
         (None, None, None) => {
             return Err(

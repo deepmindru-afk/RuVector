@@ -31,6 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut workers_arg: Option<String> = None;
     let mut workers_file_arg: Option<String> = None;
+    // ADR-172 §1c iter-107: optional Ed25519 detached signature on the
+    // manifest. Both must be set together; either alone is a misconfig.
+    let mut workers_file_sig: Option<String> = None;
+    let mut workers_file_pubkey: Option<String> = None;
     let mut tag_arg: Option<String> = None;
     let mut port_arg: u16 = 50051;
     let mut dim: usize = 384;
@@ -71,6 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--workers" => { workers_arg = args.get(i + 1).cloned(); i += 2; }
             "--workers-file" => { workers_file_arg = args.get(i + 1).cloned(); i += 2; }
+            "--workers-file-sig" => { workers_file_sig = args.get(i + 1).cloned(); i += 2; }
+            "--workers-file-pubkey" => { workers_file_pubkey = args.get(i + 1).cloned(); i += 2; }
             "--tailscale-tag" => { tag_arg = args.get(i + 1).cloned(); i += 2; }
             "--port" => {
                 port_arg = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50051);
@@ -146,7 +152,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect();
             Box::new(StaticDiscovery::new(workers))
         }
-        (None, Some(path), None) => Box::new(FileDiscovery::new(path)),
+        (None, Some(path), None) => {
+            let mut fd = FileDiscovery::new(path);
+            // ADR-172 §1c iter-107: if either of the sig flags is set,
+            // both must be — refuse partial config so an operator can't
+            // accidentally disable verification by forgetting one half.
+            match (&workers_file_sig, &workers_file_pubkey) {
+                (Some(s), Some(p)) => fd = fd.with_signature(s, p),
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        "--workers-file-sig and --workers-file-pubkey must both be set or both unset (ADR-172 §1c)"
+                            .into(),
+                    );
+                }
+                (None, None) => {}
+            }
+            Box::new(fd)
+        }
         (None, None, Some(tag)) => Box::new(TailscaleDiscovery::new(tag, port_arg)),
         (None, None, None) => {
             return Err(
@@ -503,6 +525,14 @@ DISCOVERY (exactly one):
     --workers-file <path>           Manifest file: one `host:port` or
                                      `name = host:port` per line; blank
                                      lines and `#` comments allowed.
+    --workers-file-sig <path>       Optional Ed25519 detached signature
+                                     on the manifest (128 hex chars in a
+                                     text file). Pair with the matching
+                                     pubkey flag to enforce manifest
+                                     integrity (ADR-172 §1c).
+    --workers-file-pubkey <path>    32-byte Ed25519 verifying key as 64
+                                     hex chars in a text file. Required
+                                     when --workers-file-sig is set.
     --tailscale-tag <tag> [--port N]  Discover via tailscale; tag matches
                                      peers, port is the gRPC port.
 

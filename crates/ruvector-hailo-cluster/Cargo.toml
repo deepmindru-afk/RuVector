@@ -36,6 +36,9 @@ tokio              = { version = "1", default-features = false, features = ["rt-
 # rate limiter is opt-in via env var but the code path always compiles.
 dashmap            = "6"
 governor           = { version = "0.7", default-features = false, features = ["std", "quanta"] }
+# ADR-172 §1c iter-107: optional Ed25519 detached signature verification
+# on `--workers-file` manifests. Pure-Rust, no native deps.
+ed25519-dalek      = { version = "2", default-features = false, features = ["std"] }
 tokio-stream       = { version = "0.1", default-features = false, features = ["net"] }
 futures-core       = "0.3"
 serde              = { version = "1", features = ["derive"] }

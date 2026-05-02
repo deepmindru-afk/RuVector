@@ -64,12 +64,25 @@ present a CA-issued cert. Tested via `tests/mtls_roundtrip.rs` — 3 cases:
 (3) untrusted self-signed client rejected. Bearer-token interceptor
 remains a future option for token-based deployments.
 
-**1c. `--workers-file` accepts arbitrary host:port.**
-Path-traversal (file injection) and SSRF via discovery file content.
+**1c. `--workers-file` accepts arbitrary host:port.** [✅ MITIGATED — iter 107]
+Path-traversal (file injection) and SSRF via discovery file content
+were the original concern.
 
-*Mitigation:* Document that `--workers-file` must be operator-controlled.
-Add a manifest signature option (`--workers-file-sig <path>`) that
-verifies a detached Ed25519 signature before loading.
+*Mitigation (shipped iter 107):* New `crate::manifest_sig` module wraps
+`ed25519-dalek` (pure Rust, no native deps) into a detached-signature
+verifier. `FileDiscovery::with_signature(sig_path, pubkey_path)`
+re-reads both files on every `discover()` call and verifies them
+*before* the manifest is parsed — defends against a parser bug being
+a CVE vector for unsigned input. `embed`, `bench`, and `stats` all
+gain matching `--workers-file-sig <path>` + `--workers-file-pubkey
+<path>` flags; partial config (one flag without the other) is refused
+loudly so an operator can't accidentally disable verification by
+forgetting one half. Wire format is plain ASCII hex (128 chars for
+the signature, 64 for the pubkey) so `cat` works for debugging and
+no PEM/PKCS8 parser is pulled in. 6 unit tests cover the matrix:
+valid sig accepted, trailing newlines tolerated, tampered manifest
+rejected, wrong pubkey rejected, short signature rejected, non-hex
+chars rejected.
 
 **1d. Tailscale tag spoofing.**
 If an attacker controls a tagged peer they auto-join the fleet via

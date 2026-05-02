@@ -60,13 +60,35 @@ impl Discovery for StaticDiscovery {
 /// so the caller can see exactly which entry to fix.
 pub struct FileDiscovery {
     path: std::path::PathBuf,
+    /// ADR-172 §1c iter-107: optional Ed25519 detached signature
+    /// verification. When `Some(_)`, `discover()` reads both files,
+    /// verifies the signature against the manifest under the configured
+    /// public key, and refuses to surface workers if verification fails.
+    sig_pubkey: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 impl FileDiscovery {
     /// Construct from a manifest file path. The file is read on each
     /// `discover()` call, so live edits are picked up on the next probe.
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            sig_pubkey: None,
+        }
+    }
+
+    /// Require an Ed25519 detached signature on the manifest (ADR-172 §1c).
+    /// `sig_path` holds the 128-hex-char detached signature; `pubkey_path`
+    /// holds the 64-hex-char public key. Both files are re-read on every
+    /// `discover()` call so a key rotation takes effect on the next probe
+    /// without restarting the coordinator.
+    pub fn with_signature(
+        mut self,
+        sig_path: impl Into<std::path::PathBuf>,
+        pubkey_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.sig_pubkey = Some((sig_path.into(), pubkey_path.into()));
+        self
     }
 
     /// Parse a manifest body without touching the filesystem — separate
@@ -124,6 +146,13 @@ impl FileDiscovery {
 
 impl Discovery for FileDiscovery {
     fn discover(&self) -> Result<Vec<WorkerEndpoint>, ClusterError> {
+        // ADR-172 §1c iter-107: when a signature is configured, verify
+        // *before* parsing. We don't even tokenize the manifest until
+        // we know the bytes match the operator's signing key — defends
+        // against a parser bug being a CVE vector for unsigned input.
+        if let Some((sig_path, pubkey_path)) = &self.sig_pubkey {
+            crate::manifest_sig::verify_files(&self.path, sig_path, pubkey_path)?;
+        }
         let body = std::fs::read_to_string(&self.path).map_err(|e| ClusterError::Transport {
             worker: "<discovery>".into(),
             reason: format!("FileDiscovery: read {}: {}", self.path.display(), e),
