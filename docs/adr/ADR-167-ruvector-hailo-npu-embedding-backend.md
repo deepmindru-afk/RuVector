@@ -32,7 +32,7 @@ lands, drop the `model.hef` into the same dir and restart — no other
 code changes required, the existing `HailoEmbedder::open` path picks
 up the HEF and bypasses CPU fallback automatically.
 
-### HEF model surgery (iter 136+ follow-up, currently scoped only)
+### HEF model surgery (iter 139 — partial progress, blocked on SDK bug)
 
 The Hailo-8 NPU's HN graph format doesn't represent the standard
 HuggingFace BERT export's:
@@ -41,19 +41,48 @@ HuggingFace BERT export's:
 - `Where`/`Expand` ops for broadcasting the attention mask across
   the QK^T product
 
-The recommended surgery (from Hailo's parser recommendation output):
-1. Move embedding lookups host-side: tokenize → embedding-table lookup
-   → send `embeddings_out` (shape `[1, 128, 384]` float) to the NPU
-   instead of `input_ids`
-2. Pre-compute the attention mask host-side and apply it post-NPU
-3. Re-export the ONNX with `start_node_names=[/embeddings/Add_1]` and
-   `end_node_names=[last_hidden_state]` — encoder layers only, no
-   embedding lookup, no mask broadcast
-4. Worker's gRPC API stays the same; the change is internal to
-   `HailoEmbedder::embed`
+**Iter 139 attempt** (`deploy/{export-minilm-encoder-onnx,compile-encoder-hef}.py`)
+re-exported the BERT encoder block in isolation:
+- Wrapped `BertEncoder` so it takes `hidden_states` `[1, 128, 384]`
+  directly — no embedding Gather
+- Baked the attention mask in as a constant zero (full attention) —
+  no Where/Expand. Host-side mean-pool re-applies the real mask.
+- Verified via onnx introspection: 0 Gather/Where/Expand ops in the
+  encoder ONNX, just MatMul/Softmax/Add/Mul/Reshape encoder primitives.
 
-This is ~2-3 days of work. Documented but not scheduled — the cpu-
-fallback path is sufficient for current ruvllm + ruview throughput.
+**Pipeline progress:**
+- ✅ Parse stage: clean (43 MB parsed HAR produced)
+- ✅ Full-precision optimize: clean (86 MB optimized HAR produced)
+- ❌ **INT8 optimize fails** with
+  `KeyError: 'minilm_encoder/input_layer1'` in the SDK's
+  `_decompose_layer_norm` algorithm
+  (`hailo_model_optimization` v3.33). The layer DOES exist in the
+  parsed HAR, but the algorithm's internal `input_shape` dict is
+  built from a different source and doesn't include it. Tried:
+  `model_optimization_flavor(optimization_level=0)` —
+  `_decompose_layer_norm` runs in `pre_quantization_structural`
+  unconditionally, so the level setting doesn't help.
+- ❌ Compile stage: blocked on Hailo-8 hardware requiring INT8
+  quantized weights (full-precision HEF would be possible on
+  hailo15h but not hailo8).
+
+**Status:** the encoder ONNX is fundamentally Hailo-compatible (it
+parses + full-precision-optimizes cleanly). The remaining gap is an
+SDK-internal bug in INT8 quantization of transformer encoders that
+can't be worked around from user-space. The cleanest unblock paths:
+1. Hailo support ticket (the SDK should not KeyError on a layer it
+   knows about — this is a quantization-flow bug, not a
+   user-input bug)
+2. Wait for next DFC release and re-try
+3. Crib the model_script from Hailo Model Zoo's `bert_base_uncased.yaml`
+   (targets hailo15h, but the model_script directives may cross-apply)
+
+**Net for this branch**: cpu-fallback (Path C) remains the production
+embedding path. NPU acceleration via HEF is unblocked at every layer
+EXCEPT the SDK quantization bug. When that resolves, the iter-139
+helpers (`export-minilm-encoder-onnx.py`, `compile-encoder-hef.py`)
+produce the HEF in one command and the host-side embedding-lookup
++ post-NPU mean-pool is ~150 LOC of Rust to add to `HailoEmbedder`.
 
 **Earlier (iter 116) snapshot** preserved below for historical context.
 
