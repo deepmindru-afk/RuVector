@@ -45,6 +45,7 @@ plus a sensor-bridge bin added in iter 116:
 | `ruvector-hailo-cluster-bench` | Client: load harness | no | bounded duration |
 | `ruvector-mmwave-bridge` | Sensor: 60 GHz mmWave radar UART → cluster embed RPC (iter 116) | n/a (UART or simulator) | yes (radar event stream) |
 | `ruview-csi-bridge` | Sensor: RuView ADR-018 CSI UDP → cluster embed RPC (ADR-171, iter 123) | n/a (UDP listener) | yes (CSI frame stream) |
+| `ruvllm-bridge` | LLM seam: JSONL stdin → cluster embed RPC → JSONL stdout (ADR-173, iter 124) | yes (one JSON request per line) | yes (until EOF) |
 
 ### Shared flag vocabulary
 

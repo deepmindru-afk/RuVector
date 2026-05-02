@@ -83,6 +83,13 @@ path = "src/bin/mmwave-bridge.rs"
 name = "ruview-csi-bridge"
 path = "src/bin/ruview-csi-bridge.rs"
 
+[[bin]]
+# Iter 124: ADR-173 / ruvllm host-side seam. JSONL stdin/stdout
+# adapter so any ruvllm process (or curl + jq) can embed text via
+# the cluster without speaking gRPC.
+name = "ruvllm-bridge"
+path = "src/bin/ruvllm-bridge.rs"
+
 [build-dependencies]
 tonic-build         = { version = "0.12", default-features = false, features = ["prost"] }
 protoc-bin-vendored = "3"
