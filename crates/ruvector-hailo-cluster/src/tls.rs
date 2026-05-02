@@ -70,8 +70,10 @@ impl TlsClient {
         Ok(Self { inner })
     }
 
-    /// Attach a client cert + key for mTLS (ADR-172 §1b — staged for a
-    /// later iter, but plumbed now so the API doesn't need to grow).
+    /// Attach a client cert + key for mTLS (ADR-172 §1b mitigation, iter 100).
+    /// The worker will accept the connection only if this cert chains
+    /// to its `--client-ca` bundle (set via the `RUVECTOR_TLS_CLIENT_CA`
+    /// env var on the server side).
     pub fn with_client_identity(
         self,
         cert_pem_path: impl AsRef<Path>,
@@ -79,8 +81,15 @@ impl TlsClient {
     ) -> Result<Self, ClusterError> {
         let cert = read_pem(cert_pem_path.as_ref(), "client cert")?;
         let key = read_pem(key_pem_path.as_ref(), "client key")?;
-        let identity = Identity::from_pem(cert, key);
-        Ok(Self { inner: self.inner.identity(identity) })
+        Ok(self.with_client_identity_bytes(&cert, &key))
+    }
+
+    /// In-memory variant of [`Self::with_client_identity`]. Useful for
+    /// tests + embedded deploys where the client identity is generated
+    /// at runtime rather than read from a file.
+    pub fn with_client_identity_bytes(self, cert_pem: &[u8], key_pem: &[u8]) -> Self {
+        let identity = Identity::from_pem(cert_pem, key_pem);
+        Self { inner: self.inner.identity(identity) }
     }
 
     /// Unwrap to the underlying tonic `ClientTlsConfig`. Pub so the
@@ -118,15 +127,23 @@ impl TlsServer {
         Self { inner: ServerTlsConfig::new().identity(identity) }
     }
 
-    /// Require client certs signed by `ca_pem_path` (mTLS — ADR-172 §1b).
+    /// Require client certs signed by `ca_pem_path` (mTLS — ADR-172 §1b
+    /// mitigation, iter 100). Combined with the default
+    /// `client_auth_optional = false` from `ServerTlsConfig::new`, any
+    /// client lacking a CA-signed identity is rejected at handshake.
     pub fn with_client_ca(
         self,
         ca_pem_path: impl AsRef<Path>,
     ) -> Result<Self, ClusterError> {
         let ca = read_pem(ca_pem_path.as_ref(), "client ca")?;
-        Ok(Self {
-            inner: self.inner.client_ca_root(Certificate::from_pem(ca)),
-        })
+        Ok(self.with_client_ca_bytes(&ca))
+    }
+
+    /// In-memory variant of [`Self::with_client_ca`].
+    pub fn with_client_ca_bytes(self, ca_pem: &[u8]) -> Self {
+        Self {
+            inner: self.inner.client_ca_root(Certificate::from_pem(ca_pem)),
+        }
     }
 
     /// Unwrap to the underlying tonic `ServerTlsConfig`. Pub for the

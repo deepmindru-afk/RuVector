@@ -50,13 +50,19 @@ self-signed cert generated at runtime, full embed + health roundtrip
 asserted, plus a negative test that plaintext clients fail cleanly
 against TLS-only servers.
 
-**1b. No client authentication.**
-Any tonic client reaching a worker can saturate `/dev/hailo0`. NPU is a
-shared limited resource — single attacker can deny service to all.
+**1b. No client authentication.** [✅ MITIGATED — iter 100]
+Any tonic client reaching a worker could saturate `/dev/hailo0`. NPU is
+a shared limited resource — a single attacker could deny service to all.
 
-*Mitigation:* mTLS (1a) provides identity. Add a `--require-client-cert`
-worker flag. Optionally add a simple bearer-token gate via tonic
-interceptor for token-based deployments.
+*Mitigation (shipped iter 100):* Worker reads `RUVECTOR_TLS_CLIENT_CA`
+env var (added iter 99) and applies `TlsServer::with_client_ca`. Combined
+with tonic's default `client_auth_optional = false`, any client lacking
+a CA-signed identity is rejected at handshake. Coordinator side gains
+`TlsClient::with_client_identity_bytes` / `with_client_identity` to
+present a CA-issued cert. Tested via `tests/mtls_roundtrip.rs` — 3 cases:
+(1) valid CA-signed client succeeds, (2) anonymous client rejected,
+(3) untrusted self-signed client rejected. Bearer-token interceptor
+remains a future option for token-based deployments.
 
 **1c. `--workers-file` accepts arbitrary host:port.**
 Path-traversal (file injection) and SSRF via discovery file content.
@@ -210,7 +216,7 @@ session key. Out-of-band key exchange via QR code at provisioning.
 |---|---|---|---|
 | 91 | HIGH | 1a — TLS support | tonic ServerTlsConfig + ClientTlsConfig; docs (✅ shipped iter 99) |
 | 91 | LOW | 4a/4b — request_id sanitisation | proto::extract_request_id 64-char cap + control-char strip |
-| 92 | HIGH | 1b — mTLS client auth | --require-client-cert worker flag |
+| 92 | HIGH | 1b — mTLS client auth | --require-client-cert worker flag (✅ shipped iter 100 via RUVECTOR_TLS_CLIENT_CA) |
 | 92 | MEDIUM | 5c — cargo-audit CI | new workflow + initial vuln triage |
 | 93 | MEDIUM | 3a — drop root | new user + udev rule + install.sh update |
 | 93 | MEDIUM | 2a — fp required with cache | CLI flag enforcement + docs |
