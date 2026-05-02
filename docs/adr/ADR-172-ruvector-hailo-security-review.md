@@ -122,17 +122,36 @@ CI that fails any PR introducing cache-on-disk paths.
 
 ### 3. Worker-side hardening — MEDIUM
 
-**3a. libhailort runs as root by default.**
-`/dev/hailo0` is `crw-rw-rw-` on the Pi 5 we tested, so root isn't
-strictly required — but the systemd unit defaults to root. ProtectSystem
-strict + NoNewPrivileges help; a dedicated `ruvector-hailo` user would
-be safer.
+**3a. libhailort runs as root by default.** [✅ MITIGATED — iter 106]
+`/dev/hailo0` was `crw-rw-rw-` on the Pi 5 we tested, so root wasn't
+strictly required — but the original systemd unit ran as the operator's
+login account (`genesis`) which still had broad filesystem access.
 
-*Mitigation:* Update `deploy/ruvector-hailo-worker.service`:
-- `User=ruvector-hailo` / `Group=ruvector-hailo`
-- `DynamicUser=true` as alternative
-- udev rule `KERNEL=="hailo0", MODE="0660", GROUP="ruvector-hailo"`
-- `install.sh` creates the user/group + drops the udev file
+*Mitigation (shipped iter 106):* The `deploy/` tree now drops three
+artifacts that together make the worker run as a dedicated unprivileged
+system user with no shell, no home, and no supplementary groups:
+
+- `99-hailo-ruvector.rules` — udev rule giving the `ruvector-worker`
+  group `0660 rw` on every `hailo[0-9]+` device under
+  `SUBSYSTEM=="hailo_chardev"`.
+- `ruvector-hailo-worker.service` — `User=ruvector-worker`,
+  `Group=ruvector-worker`, `CapabilityBoundingSet=` (empty),
+  `AmbientCapabilities=` (empty), `MemoryDenyWriteExecute=yes`,
+  `SystemCallFilter=@system-service ~@privileged @resources @mount @swap @reboot`,
+  `ProtectClock=yes`, `ProtectHostname=yes`, `ProtectKernelLogs=yes`,
+  `ProtectProc=invisible`, plus the systemd-managed `StateDirectory=ruvector-hailo`
+  (auto-creates `/var/lib/ruvector-hailo` with the right mode/owner).
+- `install.sh` — idempotent `useradd --system --no-create-home
+  --shell /usr/sbin/nologin`, drops the udev rule + reloads + triggers,
+  chowns the state dir, no longer rewrites the unit file at install
+  time (was a `User=$SUDO_USER` substitution).
+
+`bash -n` clean; `systemd-analyze verify` parses cleanly except for
+the expected "binary not present on dev host" warning. End-to-end
+verification on the Pi happens once the worker upgrade lands — the
+`ps -o user,pid,cmd -C ruvector-hailo-worker` check in the install
+output prints the new owner so the operator sees drop-root
+took effect at first boot.
 
 **3b. No rate limiting per peer.** [✅ MITIGATED — iter 104]
 Single client could DoS by saturating NPU at line rate. Workers process
@@ -251,7 +270,7 @@ session key. Out-of-band key exchange via QR code at provisioning.
 | 91 | LOW | 4a/4b — request_id sanitisation | proto::extract_request_id 64-char cap + control-char strip |
 | 92 | HIGH | 1b — mTLS client auth | --require-client-cert worker flag (✅ shipped iter 100 via RUVECTOR_TLS_CLIENT_CA) |
 | 92 | MEDIUM | 5c — cargo-audit CI | new workflow + initial vuln triage |
-| 93 | MEDIUM | 3a — drop root | new user + udev rule + install.sh update |
+| 93 | MEDIUM | 3a — drop root | new user + udev rule + install.sh update (✅ shipped iter 106) |
 | 93 | MEDIUM | 2a — fp required with cache | CLI flag enforcement + docs (✅ shipped iter 101) |
 | 94 | MEDIUM | 3b — per-peer rate limit | governor interceptor (✅ shipped iter 104 via RUVECTOR_RATE_LIMIT_RPS env) |
 | 94 | MEDIUM | 2b — auto-fp quorum requirement | discover_fingerprint quorum mode (✅ shipped iter 102) |
