@@ -25,6 +25,7 @@ pub use tokenizer::{EncodedInput, SpecialIds, WordPieceTokenizer};
 pub use cpu_embedder::CpuEmbedder;
 
 use std::path::Path;
+#[cfg(feature = "hailo")]
 use std::sync::Mutex;
 
 /// Convenience alias matching ruvector-core's `Result<T> = Result<T, Error>`.
@@ -54,10 +55,11 @@ pub struct HailoEmbedder {
     /// Wrapped in `Mutex` so concurrent reads serialize safely; the
     /// libhailort vdevice is documented thread-safe for inference but
     /// thermal reads + future config writes still want serial access.
-    /// Only constructed and read under `feature = "hailo"`; without
-    /// that feature `open()` short-circuits to `FeatureDisabled`.
-    #[allow(dead_code)]
-    device: Mutex<crate::device::HailoDevice>,
+    /// Iter 137 — gated on `feature = "hailo"` AND wrapped in Option
+    /// so the cpu-fallback path can ship on hosts that *built* the
+    /// hailo feature in but happen to lack a HAT at runtime.
+    #[cfg(feature = "hailo")]
+    device: Option<Mutex<crate::device::HailoDevice>>,
     /// Iter 133 — Path C CPU fallback. `Some(_)` when the operator
     /// has model.safetensors + tokenizer.json + config.json in the
     /// model dir but no HEF (yet). When set, `embed()` dispatches to
@@ -81,76 +83,83 @@ impl HailoEmbedder {
     ///   special_tokens.json   # CLS/SEP/PAD ids
     /// ```
     pub fn open(model_dir: &Path) -> Result<Self> {
-        #[cfg(not(feature = "hailo"))]
+        // Iter 137: combinatorial feature gating. Build matrix:
+        //   * neither feature      → FeatureDisabled (default x86 dev)
+        //   * hailo only           → device-only (HAT host, no Python deps)
+        //   * cpu-fallback only    → CPU-only (dev box, no HailoRT installed)
+        //   * hailo + cpu-fallback → device + CPU fallback (production Pi)
+        // Default no-features build: short-circuit. Returning here also
+        // makes the constructor below dead code, so we provide stub
+        // values for `device_id` etc. so the cfg lattice still compiles.
+        #[cfg(all(not(feature = "hailo"), not(feature = "cpu-fallback")))]
         {
             let _ = model_dir;
-            Err(HailoError::FeatureDisabled)
+            return Err(HailoError::FeatureDisabled);
         }
+        #[cfg(all(not(feature = "hailo"), not(feature = "cpu-fallback")))]
+        #[allow(unreachable_code)]
+        let device_id = String::new();
+
+        // Try to open the Hailo device when the feature is on. If the
+        // host has no HAT we still want CPU fallback to succeed — only
+        // surface the device error if we can't fall back.
         #[cfg(feature = "hailo")]
-        {
-            // Iter 87: open the vdevice for real. The HEF + tokenizer
-            // + vstream wiring lives in EmbeddingPipeline (still gated
-            // on the .hef file landing). With just the vdevice open,
-            // the worker process can:
-            //   * report ready=true on health probes (dimensions > 0)
-            //   * dispatch traffic from the cluster (each embed call
-            //     errors with NotYetImplemented until inference wires)
-            //
-            // This is the deploy-readiness checkpoint: every part of the
-            // path except the model itself is production-shaped.
-            let device = crate::device::HailoDevice::open()?;
-
-            // Probe the runtime to confirm libhailort responded.
-            let v = device.version().unwrap_or((0, 0, 0));
-            let device_id = format!(
-                "hailort:{}.{}.{}",
-                v.0, v.1, v.2
-            );
-
-            // Iter 133 path-C: if no model.hef but we DO have the HF
-            // safetensors trio, fall back to real BERT-6 on CPU. The
-            // NPU stays warm (vdevice is open) so once an HEF lands
-            // restart is the only step. `cpu_fallback` is only present
-            // when built with `--features cpu-fallback`.
+        let (device_opt, device_id) = match crate::device::HailoDevice::open() {
+            Ok(device) => {
+                let v = device.version().unwrap_or((0, 0, 0));
+                let device_id = format!("hailort:{}.{}.{}", v.0, v.1, v.2);
+                (Some(device), device_id)
+            }
             #[cfg(feature = "cpu-fallback")]
-            let cpu_fallback = {
-                let hef_path = model_dir.join("model.hef");
-                let safetensors = model_dir.join("model.safetensors");
-                if !hef_path.exists() && safetensors.exists() {
-                    // BadModelDir errors here propagate up — operator
-                    // sees "missing tokenizer.json" etc. rather than
-                    // a confusing later embed-time failure.
-                    Some(crate::cpu_embedder::CpuEmbedder::open(model_dir)?)
-                } else {
-                    None
-                }
-            };
-
-            // When CPU fallback is active, take its dimension as the
-            // truth (BERT config drives it, not the constant).
-            #[cfg(feature = "cpu-fallback")]
-            let dimensions = cpu_fallback
-                .as_ref()
-                .map(|c| c.output_dim())
-                .unwrap_or(crate::inference::MINI_LM_DIM);
+            Err(_) => (None, "cpu-fallback:no-device".to_string()),
             #[cfg(not(feature = "cpu-fallback"))]
-            let dimensions = crate::inference::MINI_LM_DIM;
+            Err(e) => return Err(e),
+        };
 
-            Ok(Self {
-                dimensions,
-                name: format!(
-                    "hailo:{}",
-                    model_dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown-model")
-                ),
-                device_id,
-                device: Mutex::new(device),
-                #[cfg(feature = "cpu-fallback")]
-                cpu_fallback,
-            })
-        }
+        #[cfg(all(not(feature = "hailo"), feature = "cpu-fallback"))]
+        let device_id = "cpu-fallback:no-hailo-feature".to_string();
+
+        // Iter 133 path-C: load CPU fallback when the feature is on
+        // and the model dir has the HF safetensors trio. When there's
+        // no HEF (always true today — model surgery pending) the CPU
+        // fallback is the sole inference path.
+        #[cfg(feature = "cpu-fallback")]
+        let cpu_fallback = {
+            let safetensors = model_dir.join("model.safetensors");
+            let hef_path = model_dir.join("model.hef");
+            if !hef_path.exists() && safetensors.exists() {
+                Some(crate::cpu_embedder::CpuEmbedder::open(model_dir)?)
+            } else {
+                None
+            }
+        };
+
+        // Dimension comes from the CPU fallback's BERT config when
+        // available, otherwise the MINI_LM constant. Future HEF path
+        // reads it from the network group's output shape.
+        #[cfg(feature = "cpu-fallback")]
+        let dimensions = cpu_fallback
+            .as_ref()
+            .map(|c| c.output_dim())
+            .unwrap_or(crate::inference::MINI_LM_DIM);
+        #[cfg(not(feature = "cpu-fallback"))]
+        let dimensions = crate::inference::MINI_LM_DIM;
+
+        Ok(Self {
+            dimensions,
+            name: format!(
+                "hailo:{}",
+                model_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown-model")
+            ),
+            device_id,
+            #[cfg(feature = "hailo")]
+            device: device_opt.map(Mutex::new),
+            #[cfg(feature = "cpu-fallback")]
+            cpu_fallback,
+        })
     }
 
     /// Read the on-die NPU temperature(s) from the held-open vdevice.
@@ -166,7 +175,10 @@ impl HailoEmbedder {
         }
         #[cfg(feature = "hailo")]
         {
-            let g = self.device.lock().unwrap_or_else(|p| p.into_inner());
+            // None when no HAT was present at open time — cpu-fallback
+            // path with no NPU. Caller treats this the same as a failed
+            // sensor read, which is the correct semantic.
+            let g = self.device.as_ref()?.lock().unwrap_or_else(|p| p.into_inner());
             g.chip_temperature()
         }
     }
@@ -199,30 +211,32 @@ impl HailoEmbedder {
     /// the ModelLoaded gate trips and `embed` starts dispatching to
     /// the NPU's vstream API.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        #[cfg(not(feature = "hailo"))]
-        {
-            let _ = text;
-            Err(HailoError::FeatureDisabled)
+        // Iter 137: dispatch order:
+        //   1. CPU fallback if loaded (real semantic vectors today)
+        //   2. NPU HEF inference (only path that exercises the device,
+        //      currently NoModelLoaded — pending HEF model surgery)
+        //   3. FeatureDisabled if neither feature is built in
+        #[cfg(feature = "cpu-fallback")]
+        if let Some(cpu) = &self.cpu_fallback {
+            return cpu.embed(text);
         }
+
         #[cfg(feature = "hailo")]
         {
-            // Iter 133 path-C: when the CPU fallback is loaded,
-            // dispatch to it. Real BERT-6 inference, real semantic
-            // vectors. Slow vs NPU but honest — and the device
-            // handle is intentionally NOT locked here so a future
-            // HEF path can run in parallel with CPU fallback during
-            // a hot-swap.
-            #[cfg(feature = "cpu-fallback")]
-            if let Some(cpu) = &self.cpu_fallback {
-                return cpu.embed(text);
-            }
-
             let _ = text;
             // Hold the device lock briefly — preserves the contract
             // that the real HEF-based inference path needs
             // single-writer access to the vstream descriptors.
-            let _guard = self.device.lock().unwrap_or_else(|p| p.into_inner());
-            Err(HailoError::NoModelLoaded)
+            if let Some(dev) = &self.device {
+                let _guard = dev.lock().unwrap_or_else(|p| p.into_inner());
+            }
+            return Err(HailoError::NoModelLoaded);
+        }
+
+        #[allow(unreachable_code)]
+        {
+            let _ = text;
+            Err(HailoError::FeatureDisabled)
         }
     }
 
@@ -291,12 +305,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stub_open_returns_feature_disabled_or_not_implemented() {
+    fn open_on_missing_dir_resolves_without_panic() {
+        // Across all feature combos, opening against a nonexistent dir
+        // must resolve to either:
+        //   * Err(FeatureDisabled / NoDevice / BadModelDir / ...) —
+        //     hard failure modes the operator can act on
+        //   * Ok(embedder) with has_model() == false — the iter-130
+        //     "model not yet present" path that lets health probes
+        //     report ready=false instead of connection-refused
         let r = HailoEmbedder::open(Path::new("/nonexistent"));
-        assert!(matches!(
-            r,
-            Err(HailoError::FeatureDisabled) | Err(HailoError::NotYetImplemented(_))
-        ));
+        match r {
+            Ok(e) => assert!(
+                !e.has_model(),
+                "open(missing dir) returned Ok but has_model=true — should be ready=false"
+            ),
+            Err(
+                HailoError::FeatureDisabled
+                | HailoError::NotYetImplemented(_)
+                | HailoError::BadModelDir { .. }
+                | HailoError::NoDevice(_)
+                | HailoError::Tokenizer(_),
+            ) => {}
+            Err(other) => panic!("unexpected open() error: {:?}", other),
+        }
     }
 
     #[test]
