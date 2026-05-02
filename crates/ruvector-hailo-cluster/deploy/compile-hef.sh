@@ -94,39 +94,16 @@ ONNX="$ONNX_DIR/model.onnx"
 [[ -s "$ONNX" ]] || { echo "    ONNX export missing $ONNX" >&2; exit 3; }
 echo "    $(stat --format='%s' "$ONNX") bytes → $ONNX"
 
-echo "==> [4/5] hailo parser → optimize → compile"
-# Hailo's three-stage pipeline. DFC 3.33 flag spelling:
-#   parser:   --har-path  (output HAR)
-#   optimize: --output-har-path
-#   compiler: --output-dir + --output-har-path
-# Older DFCs used --output-har-path on parser too — the rename
-# happened around 3.30. This script targets 3.33+.
-PARSED="$WORK/model.har"
-# Cut the graph at `last_hidden_state` (the final encoder LayerNorm output).
-# Without this, the parser auto-detects end nodes and snags on `/Where`
-# from attention-mask broadcasting, which Hailo's HN graph can't represent.
-# We mean-pool + L2-normalize on the host post-NPU, so the pooler+tanh
-# head from the original ONNX (Gather → Gemm → Tanh after last_hidden_state)
-# is intentionally dropped.
-"$HAILO_TOOL" parser onnx "$ONNX" \
-    --net-name minilm \
-    --har-path "$PARSED" \
-    --hw-arch hailo8 \
-    --end-node-names last_hidden_state \
-    -y
-
-# We don't have a representative calibration set for all-MiniLM-L6-v2
-# (it's text — no easy 1024 random samples), so we use --use-random-calib-set.
-# This produces a working HEF whose accuracy is ~3-5% lower than a
-# calibrated build. ADR-167 follow-up: switch to a real corpus-based
-# calibration set once we have one.
-OPT_HAR="$WORK/model_optimized.har"
-"$HAILO_TOOL" optimize "$PARSED" --output-har-path "$OPT_HAR" --hw-arch hailo8 --use-random-calib-set
-
-"$HAILO_TOOL" compiler "$OPT_HAR" --output-dir "$WORK" --hw-arch hailo8
+echo "==> [4/5] hailo parse → optimize → compile (Python SDK API)"
+# We drive the SDK via Python rather than `hailo` CLI because the CLI's
+# `-y` auto-accepts the parser's end-node recommendation, which for BERT-6
+# wrongly picks `/Where` (an attention-mask broadcast that the HN graph
+# can't represent). The Python API lets us pin start/end node names
+# explicitly. See compile-hef.py for the full sequence.
+COMPILE_PY="$(dirname "${BASH_SOURCE[0]}")/compile-hef.py"
 COMPILED="$WORK/minilm.hef"
-[[ -f "$COMPILED" ]] || COMPILED="$(find "$WORK" -name '*.hef' | head -n 1)"
-[[ -s "$COMPILED" ]] || { echo "    no .hef produced under $WORK" >&2; exit 4; }
+"$PY" "$COMPILE_PY" "$ONNX" "$COMPILED"
+[[ -s "$COMPILED" ]] || { echo "    no .hef produced at $COMPILED" >&2; exit 4; }
 
 echo "==> [5/5] move to $OUT and report"
 install -m 0644 "$COMPILED" "$OUT"

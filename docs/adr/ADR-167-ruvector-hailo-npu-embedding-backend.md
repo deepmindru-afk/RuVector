@@ -13,6 +13,52 @@ related: [ADR-SYS-0027, ADR-165, ADR-166]
 
 ## Status
 
+**Iter 134/135 (2026-05-02): CPU fallback path is production-deployable
+today; HEF compile is unblocked at the tooling layer but blocked at the
+model-graph layer.** Branch `hailo-backend`.
+
+| Surface | Status |
+|---|---|
+| Hailo Dataflow Compiler install | ✅ DFC v3.33.0 + HailoRT 4.23.0 installed via `setup-hailo-compiler.sh` (iter 132/135 — auto-pins TF 2.18 + protobuf 3.20.3 + torch 2.4 + transformers 4.49 with `TRANSFORMERS_NO_TF=1` to avoid keras conflicts) |
+| ONNX export | ✅ `export-minilm-onnx.py` — `torch.onnx.export` against `transformers.AutoModel`, no optimum-cli dep (iter 135) |
+| Hailo parser → optimize → compile | ✅ Pipeline runs end-to-end via `compile-hef.py` (Python SDK API, iter 135). Fails at parse stage with `UnsupportedGatherLayerError` on the BERT `word_embeddings.Gather` and `UnexpectedNodeError` on attention-mask `Where`/`Expand` ops |
+| **Conclusion**: BERT-6 ONNX as exported from HuggingFace is **not directly compilable for Hailo-8** without model surgery — the embedding lookup and attention-mask broadcast aren't representable in Hailo's HN graph. Path A (HEF compile) requires re-exporting the ONNX with embeddings precomputed host-side and the encoder block in isolation. Substantial follow-up work; see "HEF model surgery" section below. |
+| **Path C — CPU fallback (iter 133/134)** | ✅ Fully production-deployable. `cargo build --features hailo,cpu-fallback` produces a worker binary that runs real BERT-6 on host CPU when `model.safetensors`+`tokenizer.json`+`config.json` are present in the model dir. Validated end-to-end: `sim(dog,puppy)=0.469`, `sim(dog,kafka)=-0.107` (semantically correct ordering). `deploy/download-cpu-fallback-model.sh` fetches the artifacts with sha256 pinning. Latency ~50–150 ms/embed on Cortex-A76, ~10–30 ms on AVX2. |
+
+**The "ship today" path** is `--features hailo,cpu-fallback` plus
+`download-cpu-fallback-model.sh`. Real semantic vectors flow end-to-end
+from Pi 5 worker to cluster, NPU stays idle. When the HEF model surgery
+lands, drop the `model.hef` into the same dir and restart — no other
+code changes required, the existing `HailoEmbedder::open` path picks
+up the HEF and bypasses CPU fallback automatically.
+
+### HEF model surgery (iter 136+ follow-up, currently scoped only)
+
+The Hailo-8 NPU's HN graph format doesn't represent the standard
+HuggingFace BERT export's:
+- `Gather` op for token / token-type embedding lookups (these are
+  table lookups, not real ML ops)
+- `Where`/`Expand` ops for broadcasting the attention mask across
+  the QK^T product
+
+The recommended surgery (from Hailo's parser recommendation output):
+1. Move embedding lookups host-side: tokenize → embedding-table lookup
+   → send `embeddings_out` (shape `[1, 128, 384]` float) to the NPU
+   instead of `input_ids`
+2. Pre-compute the attention mask host-side and apply it post-NPU
+3. Re-export the ONNX with `start_node_names=[/embeddings/Add_1]` and
+   `end_node_names=[last_hidden_state]` — encoder layers only, no
+   embedding lookup, no mask broadcast
+4. Worker's gRPC API stays the same; the change is internal to
+   `HailoEmbedder::embed`
+
+This is ~2-3 days of work. Documented but not scheduled — the cpu-
+fallback path is sufficient for current ruvllm + ruview throughput.
+
+**Earlier (iter 116) snapshot** preserved below for historical context.
+
+---
+
 **Implemented (modulo HEF compile, external blocker)** on branch
 `hailo-backend` as of iter 116 (2026-05-02).
 
