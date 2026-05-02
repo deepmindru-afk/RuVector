@@ -62,15 +62,52 @@ pub fn inject_request_id<T>(req: &mut tonic::Request<T>, request_id: &str) {
 /// Pull `request_id` out of an incoming tonic request's metadata,
 /// falling back to a `proto_field` if the header is absent. Returns
 /// owned `String` to decouple from the request lifetime.
+///
+/// **Security (ADR-172 §4 mitigation):** the returned id is run through
+/// [`sanitize_request_id`] before reaching tracing logs — control chars
+/// stripped, length capped at 64. A caller-supplied id full of newlines
+/// or ANSI escapes can't log-forge multi-line entries; an oversized id
+/// can't inflate log line size for resource burn.
 pub fn extract_request_id<T>(req: &tonic::Request<T>, proto_field: &str) -> String {
-    if let Some(v) = req.metadata().get(REQUEST_ID_HEADER) {
+    let raw = if let Some(v) = req.metadata().get(REQUEST_ID_HEADER) {
         if let Ok(s) = v.to_str() {
             if !s.is_empty() {
-                return s.to_string();
+                s
+            } else {
+                proto_field
             }
+        } else {
+            proto_field
         }
+    } else {
+        proto_field
+    };
+    sanitize_request_id(raw)
+}
+
+/// Strip control characters (anything < 0x20 except space, plus 0x7F)
+/// and cap at 64 chars. Used by [`extract_request_id`] to neutralise
+/// log-forging attempts and length-amplification (ADR-172 §4a/4b).
+///
+/// Returns an empty `String` for empty input — callers that want a
+/// random fallback should chain `if id.is_empty() { random_request_id() }`.
+pub fn sanitize_request_id(raw: &str) -> String {
+    const MAX_LEN: usize = 64;
+    let mut out = String::with_capacity(raw.len().min(MAX_LEN));
+    let mut byte_count = 0usize;
+    for c in raw.chars() {
+        // Strip C0 controls (0x00..0x1F) except space, and DEL (0x7F).
+        if c == ' ' || (c >= '\u{0020}' && c != '\u{007F}' && !c.is_control()) {
+            // Track *byte* length so multi-byte UTF-8 doesn't blow past
+            // the cap. Stop at MAX_LEN bytes — never push past.
+            let cl = c.len_utf8();
+            if byte_count + cl > MAX_LEN { break; }
+            out.push(c);
+            byte_count += cl;
+        }
+        // else: silently drop. We don't log-forge ourselves to warn.
     }
-    proto_field.to_string()
+    out
 }
 
 #[cfg(test)]
@@ -118,6 +155,67 @@ mod tests {
         let buf = req.encode_to_vec();
         let decoded = EmbedRequest::decode(&buf[..]).expect("protobuf roundtrip");
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn sanitize_request_id_strips_control_chars() {
+        // Control bytes — newline, tab, ESC, BEL, NUL — all must go.
+        // The non-control chars after ESC (`[31m`) are normal ASCII and
+        // survive intact: that's the right behaviour, since stripping
+        // control chars (not "ANSI sequences") is what neutralises log
+        // forging — the parser logger no longer sees the escape byte.
+        let raw = "ok-id\n\twith\x1b[31mansi\x07bell\0nul";
+        let s = sanitize_request_id(raw);
+        assert!(!s.contains('\n'), "newline must be stripped");
+        assert!(!s.contains('\t'), "tab must be stripped");
+        assert!(!s.contains('\x1b'), "ESC must be stripped");
+        assert!(!s.contains('\x07'), "BEL must be stripped");
+        assert!(!s.contains('\0'), "NUL must be stripped");
+        // The surviving chars must include the non-control text.
+        assert!(s.contains("ok-id"));
+        assert!(s.contains("nul"));
+    }
+
+    #[test]
+    fn sanitize_request_id_caps_length_at_64_bytes() {
+        // 200-char id capped to 64.
+        let raw: String = "a".repeat(200);
+        let s = sanitize_request_id(&raw);
+        assert_eq!(s.len(), 64);
+        assert!(s.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn sanitize_request_id_handles_multibyte_utf8_at_boundary() {
+        // Cap at byte length, not char length — never split a UTF-8 codepoint.
+        // 'é' is 2 bytes; build a string just past 64 bytes.
+        let raw: String = "é".repeat(40); // 80 bytes, 40 chars
+        let s = sanitize_request_id(&raw);
+        assert!(s.len() <= 64);
+        // Whatever made it in must still be valid UTF-8 (Rust enforces),
+        // and must be a whole number of 'é' chars.
+        assert!(s.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn sanitize_request_id_preserves_normal_id() {
+        let s = sanitize_request_id("0000019de68b5707983b8745");
+        assert_eq!(s, "0000019de68b5707983b8745");
+    }
+
+    #[test]
+    fn extract_request_id_sanitises_metadata_value() {
+        // Even if the metadata header carries something hostile-shaped,
+        // the value reaching tracing logs is sanitised.
+        let mut req = tonic::Request::new(EmbedRequest::default());
+        // tonic's MetadataValue parsing rejects control chars at parse
+        // time; verify the inject path stays clean. For the extract
+        // sanitiser test, exercise via the proto-field fallback.
+        inject_request_id(&mut req, "log\nforging\tid");  // bypassed by parse
+        let extracted = extract_request_id(&req, "log\nforging-fallback\tid");
+        // Either branch (metadata or fallback), output must be stripped.
+        assert!(!extracted.contains('\n'));
+        assert!(!extracted.contains('\t'));
     }
 
     #[test]
