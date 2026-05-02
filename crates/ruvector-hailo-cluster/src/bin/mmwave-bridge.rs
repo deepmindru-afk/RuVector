@@ -27,8 +27,11 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ruvector_hailo_cluster::transport::{EmbeddingTransport, WorkerEndpoint};
+use ruvector_hailo_cluster::{GrpcTransport, HailoClusterEmbedder};
 use ruvector_mmwave::{invert_xor_public, Event, Mr60Parser};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +43,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sim_rate_hz: u32 = 10;
     let mut baud: u32 = 115_200;
     let mut quiet = false;
+
+    // Iter 116: cluster posting. When --workers is provided, every
+    // decoded event is converted to a natural-language description and
+    // posted to the hailo-backend cluster via the embed RPC. The
+    // cluster's existing §1b mTLS gate, §2a fp+cache gate, and §3b
+    // rate-limit interceptor all apply to this traffic the same way
+    // they do to embed/bench. Plaintext gRPC for now (Tailscale handles
+    // wire encryption); add `--features tls` + the TLS flag set for
+    // production deploys with mTLS-only clusters.
+    let mut workers_csv: Option<String> = None;
+    let mut dim: usize = 384;
+    let mut fingerprint: String = String::new();
+    let mut allow_empty_fingerprint = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -74,6 +90,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet = true;
                 i += 1;
             }
+            "--workers" => {
+                workers_csv = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--dim" => {
+                dim = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(384);
+                i += 2;
+            }
+            "--fingerprint" => {
+                fingerprint = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
+            "--allow-empty-fingerprint" => {
+                allow_empty_fingerprint = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -86,6 +118,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Optional cluster sink. None = log JSONL only (the iter-115
+    // behaviour); Some = post each decoded event to the cluster.
+    let cluster: Option<Arc<HailoClusterEmbedder>> = if let Some(csv) = workers_csv.as_ref() {
+        // ADR-172 §2a same gate the embed/bench bins enforce.
+        if fingerprint.is_empty() && !allow_empty_fingerprint {
+            return Err(
+                "refusing --workers with empty --fingerprint (ADR-172 §2a); pass \
+                 --fingerprint <hex> or --allow-empty-fingerprint"
+                    .into(),
+            );
+        }
+        let workers: Vec<WorkerEndpoint> = csv
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .enumerate()
+            .map(|(idx, addr)| WorkerEndpoint::new(format!("static-{}", idx), addr.trim().to_string()))
+            .collect();
+        if workers.is_empty() {
+            return Err("--workers list is empty".into());
+        }
+        let transport: Arc<dyn EmbeddingTransport + Send + Sync> = Arc::new(GrpcTransport::new()?);
+        let c = HailoClusterEmbedder::new(workers, transport, dim, fingerprint.clone())?;
+        if !quiet {
+            eprintln!(
+                "ruvector-mmwave-bridge: cluster sink active — {} worker(s), dim={}, fp={:?}",
+                csv.split(',').filter(|s| !s.is_empty()).count(),
+                dim,
+                if fingerprint.is_empty() { "<unset>" } else { fingerprint.as_str() },
+            );
+        }
+        Some(Arc::new(c))
+    } else {
+        None
+    };
+
     // Mode selection precedence: --simulator wins (always — operator
     // explicitly asked for synthetic), then --device, then --auto.
     if simulator {
@@ -95,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sim_rate_hz
             );
         }
-        run_simulator(sim_rate_hz, quiet)?;
+        run_simulator(sim_rate_hz, quiet, cluster.as_deref())?;
         return Ok(());
     }
 
@@ -118,7 +185,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     set_baud(&dev, baud)?;
     let mut file = std::fs::File::open(&dev)?;
-    run_serial(&mut file, quiet)
+    run_serial(&mut file, quiet, cluster.as_deref())
+}
+
+/// Convert a decoded radar event into a natural-language description
+/// for the embed RPC. Iter-116 keeps the surface minimal — short
+/// sentences are intentionally embedding-friendly (sentence-transformers
+/// shines at this granularity). Downstream RAG queries like
+/// "did the kitchen sensor see anyone in the last hour?" can match
+/// against these strings via cosine similarity.
+fn event_to_text(ev: &Event) -> Option<String> {
+    Some(match ev {
+        Event::Breathing { bpm } => {
+            format!("breathing rate {} bpm at radar sensor", bpm)
+        }
+        Event::HeartRate { bpm } => {
+            format!("heart rate {} bpm at radar sensor", bpm)
+        }
+        Event::Distance { cm } => {
+            format!("nearest target distance {} cm at radar sensor", cm)
+        }
+        Event::Presence { present: true } => {
+            "person detected at radar sensor".to_string()
+        }
+        Event::Presence { present: false } => {
+            "no person detected at radar sensor".to_string()
+        }
+        // Unknown / ChecksumError / Resync don't get embedded — they're
+        // protocol-layer noise, not semantic events.
+        _ => return None,
+    })
+}
+
+/// Post `text` to the cluster via the existing embed RPC. Errors are
+/// logged but don't kill the bridge — radar events keep flowing into
+/// JSONL on stdout regardless of cluster availability.
+fn post_to_cluster(cluster: &HailoClusterEmbedder, text: &str, quiet: bool) {
+    match cluster.embed_one_blocking(text) {
+        Ok(v) => {
+            if !quiet {
+                eprintln!(
+                    "ruvector-mmwave-bridge: posted text={:?} dim={} ok",
+                    text,
+                    v.len()
+                );
+            }
+        }
+        Err(e) => {
+            // Always print errors regardless of --quiet — cluster
+            // unavailability is the kind of thing operators need to see.
+            eprintln!(
+                "ruvector-mmwave-bridge: cluster post failed for {:?}: {}",
+                text, e
+            );
+        }
+    }
 }
 
 /// Configure the tty's line settings to raw + N81 + the requested baud.
@@ -149,8 +270,14 @@ fn set_baud(dev: &std::path::Path, baud: u32) -> Result<(), Box<dyn std::error::
 
 /// Drive the parser from a real serial device. Loops until EOF or
 /// SIGINT (handled implicitly by std::io::Read returning Ok(0) /
-/// errors). Logs decoded events to stdout one per line.
-fn run_serial<R: Read>(reader: &mut R, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// errors). Logs decoded events to stdout one per line, and (when a
+/// cluster is configured) posts each semantically-meaningful event
+/// to the embed RPC.
+fn run_serial<R: Read>(
+    reader: &mut R,
+    quiet: bool,
+    cluster: Option<&HailoClusterEmbedder>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = Mr60Parser::new();
     let mut buf = [0u8; 256];
     let started = Instant::now();
@@ -171,8 +298,12 @@ fn run_serial<R: Read>(reader: &mut R, quiet: bool) -> Result<(), Box<dyn std::e
         parser.feed_slice(&buf[..n], |ev| {
             total_events += 1;
             emit_event(&ev, started.elapsed());
+            if let Some(c) = cluster {
+                if let Some(text) = event_to_text(&ev) {
+                    post_to_cluster(c, &text, quiet);
+                }
+            }
         });
-        let _ = quiet;
 
         // 1 Hz status when nothing has happened — keeps log scrapers
         // from thinking the bridge is wedged on a dead-radar stream.
@@ -190,24 +321,26 @@ fn run_serial<R: Read>(reader: &mut R, quiet: bool) -> Result<(), Box<dyn std::e
 
 /// Synthetic frame generator — bypasses real hardware. Useful for
 /// (a) demoing the pipeline without the radar attached, (b) pumping
-/// regression-test fixtures into a downstream consumer, (c) iter-116's
-/// upcoming "post to cluster over mTLS" path which needs a stable
-/// frame source for soak testing.
-fn run_simulator(rate_hz: u32, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// regression-test fixtures into a downstream consumer, (c) soak
+/// testing the cluster path under a known-shape event stream.
+fn run_simulator(
+    rate_hz: u32,
+    quiet: bool,
+    cluster: Option<&HailoClusterEmbedder>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let interval = Duration::from_secs_f64(1.0 / rate_hz.max(1) as f64);
     let started = Instant::now();
     let mut parser = Mr60Parser::new();
     let mut tick: u64 = 0;
     loop {
         let frame_bytes = synthesise_frame(tick);
-        // `quiet` only mutes informational stderr (the "simulator mode @
-        // N Hz" banner, the periodic "0 events" warning). Decoded
-        // events on stdout are always emitted — they're the bin's
-        // primary output and downstream consumers (jq, log scrapers,
-        // iter-116's poster) need them regardless of verbosity.
-        let _ = quiet;
         parser.feed_slice(&frame_bytes, |ev| {
             emit_event(&ev, started.elapsed());
+            if let Some(c) = cluster {
+                if let Some(text) = event_to_text(&ev) {
+                    post_to_cluster(c, &text, quiet);
+                }
+            }
         });
         tick = tick.wrapping_add(1);
         std::thread::sleep(interval);
@@ -358,18 +491,22 @@ MODE (exactly one):\n    \
     --simulator          Generate synthetic frames; no hardware required.\n\
 \n\
 OPTIONS:\n    \
-    --baud <N>           UART baud (default 115200, MR60BHA2 stock).\n    \
-    --rate <Hz>          Simulator frame rate (default 10).\n    \
-    --quiet              Suppress informational stderr; keep stdout JSON.\n    \
-    --help               This message.\n    \
-    --version            Print version.\n\
+    --baud <N>                   UART baud (default 115200, MR60BHA2 stock).\n    \
+    --rate <Hz>                  Simulator frame rate (default 10).\n    \
+    --quiet                      Suppress informational stderr; keep stdout JSON.\n    \
+    --workers <addr1,addr2,...>  Cluster sink — post each decoded event to\n                                  the hailo-backend cluster's embed RPC. Same\n                                  semantics as --workers in embed/bench.\n    \
+    --dim <N>                    Expected embedding dim (default 384).\n    \
+    --fingerprint <hex>          Reject workers reporting a different fp.\n    \
+    --allow-empty-fingerprint    Bypass the ADR-172 §2a empty-fp gate.\n    \
+    --help                       This message.\n    \
+    --version                    Print version.\n\
 \n\
 OUTPUT:\n    \
     One JSON object per decoded event on stdout, e.g.:\n    \
     {{\"t_ms\":150,\"kind\":\"heart_rate\",\"bpm\":72}}\n\
-\n\
-Iter 116 will add --workers / --workers-file-sig / etc. for posting\n\
-into the hailo-backend cluster over mTLS.",
+    When --workers is set, semantically-meaningful events are also\n\
+    converted to natural-language descriptions (e.g. \"heart rate 72\n\
+    bpm at radar sensor\") and posted via the cluster's embed RPC.",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
     );

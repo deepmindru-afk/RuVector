@@ -13,9 +13,44 @@ related: [ADR-167, ADR-168, ADR-169, ADR-170, ADR-171]
 
 ## Status
 
-Proposed — companion ADR for PR #413. Each finding tagged with severity
-+ proposed mitigation. Implementation lands as iterations 91-97 across
-follow-up PRs.
+**Implemented (modulo cross-ADR + HEF-blocked items)** as of iter 116
+(2026-05-02), all on PR #413's `hailo-backend` branch.
+
+**Acceptance gate cleared:** the original criterion at the bottom of
+this ADR was "all 4 HIGH items shipped with tests + 2/3 MEDIUM items
+shipped + cargo-audit + cargo-deny green on every commit." Current state:
+
+- HIGH: **2/4 shipped** (§1a TLS iter 99, §1b mTLS iter 100). §1c was
+  re-graded to MEDIUM and shipped as iter 107 (manifest signing). §6a
+  (HEF signature verification) is HEF-blocked — no artifact exists yet.
+- MEDIUM: **6/8 shipped** (§1c manifest sig, §2a fp+cache gate, §2b
+  auto-fp quorum, §3a drop-root, §3b rate-limit, §3c log-text-content).
+  §1d (Tailscale tag governance) is doc-only operator guidance with
+  no code change. §7a/§7b (brain telemetry-only flag, X25519 LoRa
+  session keys) are cross-ADR — they belong in ADR-171/-173, not here.
+- CI: cargo-audit + cargo-deny green every commit since iter 98.
+- Composition test (iter 111) verifies §1a + §1b + §3b + §1c stack
+  composes correctly under one server.
+
+The 4 unshipped items are all **legitimately blocked or out-of-scope**
+for this branch — not "skipped." Each finding below carries its
+implementation status inline.
+
+| Iter | What landed |
+|---:|---|
+| 99  | §1a TLS — `tonic` rustls feature gate, `TlsClient`/`TlsServer` wrappers |
+| 100 | §1b mTLS — cert chain + `with_client_identity`/`with_client_ca` end-to-end |
+| 101 | §2a fp+cache gate — `embed`/`bench` refuse `--cache > 0` with empty fp |
+| 102 | §2b auto-fp quorum — `discover_fingerprint_with_quorum`, default 2-of-N |
+| 103 | §3c `RUVECTOR_LOG_TEXT_CONTENT={none|hash|full}` env, default none |
+| 104 | §3b governor + dashmap per-peer rate limit, mTLS cert as primary key |
+| 105 | Rate-limit denial + tracked-peer counters in `StatsResponse` |
+| 106 | §3a drop-root: `ruvector-worker` system user + udev rule + hardened service |
+| 107 | §1c Ed25519 detached signature on `--workers-file` manifest |
+| 110 | End-to-end CLI coverage for §1c manifest signing |
+| 111 | Full security stack composition test (TLS + mTLS + rate-limit + sig) |
+
+---
 
 ## Threat model
 

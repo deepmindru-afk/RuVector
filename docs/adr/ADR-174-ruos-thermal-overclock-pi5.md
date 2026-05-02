@@ -13,10 +13,35 @@ related: [ADR-167, ADR-171, ADR-173]
 
 ## Status
 
-Proposed. Companion to ADRs 171 + 173. Adds the **fifth workload** to
-the Pi 5 + AI HAT+ edge node: an in-process thermal supervisor that
-adjusts CPU clock + workload batch sizes in response to die temperature
-and per-workload thermal weight.
+**Partially implemented** as of iter 98 (2026-05-02). Companion to
+ADRs 171 + 173. Adds the **fifth workload** to the Pi 5 + AI HAT+
+edge node: an in-process thermal supervisor that adjusts CPU clock
++ workload batch sizes in response to die temperature and per-workload
+thermal weight.
+
+**What's shipped (iter 91–98):**
+
+- ✅ `crates/ruos-thermal` Rust crate with `ThermalSensor`, 5-profile `ClockProfile`
+  enum (eco/default/safe-overclock/aggressive/max), and `apply_profile()` writer
+- ✅ CLI binary with `--json`, `--prom`, `--show-profiles`, `--set-profile`,
+  `--allow-cpufreq-write` double-opt-in gate
+- ✅ systemd Type=oneshot service + 30s timer writing atomic
+  textfile-collector output to `/var/lib/node_exporter/textfile_collector/ruos-thermal.prom`
+- ✅ install.sh with hardened service unit (NoNewPrivileges, ProtectSystem=strict,
+  MemoryDenyWriteExecute, SystemCallFilter=@system-service ~@privileged @resources)
+- ✅ 6 CLI integration tests in `tests/cli.rs`
+- ✅ cargo-deny CI
+
+**What's still planned but not built (iter 95–97 follow-up):**
+
+- ❌ Per-workload thermal subscriber Unix-socket budget protocol.
+  Subscribers in `ruvector-hailo-worker` / `ruvllm-worker` / `ruview`
+  that adapt batch size / inference cadence based on a published
+  thermal-headroom budget from the supervisor.
+
+  Deferred until the HEF compile pipeline lands (ADR-167) and there's
+  a real thermal load to manage — currently the worker runs
+  FNV-1a content-hash placeholders that don't stress the NPU.
 
 ## Context
 

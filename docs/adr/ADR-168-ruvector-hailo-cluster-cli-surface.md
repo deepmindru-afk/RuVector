@@ -33,7 +33,8 @@ operational work:
 
 ## Decision
 
-Three user-facing binaries plus two server binaries (5 total):
+Three user-facing binaries plus two server binaries (5 total),
+plus a sensor-bridge bin added in iter 116:
 
 | Binary | Role | Stdin? | Long-running? |
 |---|---|:-:|:-:|
@@ -42,6 +43,7 @@ Three user-facing binaries plus two server binaries (5 total):
 | `ruvector-hailo-embed` | Client: stdin / `--text` → JSONL | yes | no (EOF exits) |
 | `ruvector-hailo-stats` | Client: fleet observability | no | optional `--watch` |
 | `ruvector-hailo-cluster-bench` | Client: load harness | no | bounded duration |
+| `ruvector-mmwave-bridge` | Sensor: 60 GHz mmWave radar UART → cluster embed RPC (iter 116) | n/a (UART or simulator) | yes (radar event stream) |
 
 ### Shared flag vocabulary
 

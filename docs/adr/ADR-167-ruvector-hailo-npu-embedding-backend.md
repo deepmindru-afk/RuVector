@@ -13,7 +13,36 @@ related: [ADR-SYS-0027, ADR-165, ADR-166]
 
 ## Status
 
-In progress on branch `hailo-backend`. Created 2026-05-01.
+**Implemented (modulo HEF compile, external blocker)** on branch
+`hailo-backend` as of iter 116 (2026-05-02).
+
+**Iter 99–116 status update** (this session): every code-side mitigation
+and feature item that was implementable without external vendor tooling
+has shipped. The original validation snapshot (iter 15) is preserved
+below for historical context. The current cumulative state:
+
+| Surface | Status as of iter 116 |
+|---|---|
+| ADR-172 security stack | 6/8 MEDIUM ✓, 2/4 HIGH ✓ — see ADR-172 acceptance gate |
+| Cluster crate test suite | 132 host tests + composition test green |
+| ESP32-S3 mmWave sensor firmware (iter A) | Live on Waveshare ESP32-S3-Touch-AMOLED-1.8; on-device parser self-test PASS(8) |
+| Shared `crates/ruvector-mmwave` parser | 10 unit tests; consumed by both firmware + host bridge |
+| Host-side `ruvector-mmwave-bridge` bin | `--simulator` produces real JSONL events; `--workers` posts via embed RPC end-to-end (verified vs fakeworker) |
+| ULID request IDs | Iter 109 — 26-char Crockford base32 |
+| Cache TTL exposed in stats | Iter 108 |
+| HEF compile pipeline (real semantic vectors) | ❌ External blocker — Hailo Dataflow Compiler is proprietary x86-host tooling, runs outside this repo |
+| ADR-174 thermal subscriber Unix-socket protocol | ❌ Deferred (iter 95-97 plan never built) |
+| Long-running coordinator daemon | ❌ Not built — CLI bins are stateless |
+| Native AsyncEmbeddingTransport trait | ❌ Public API change deferred (no consumer demand yet) |
+
+The **only** remaining gap that would meaningfully change behavior on
+the Pi 5 + Hailo-8 is the HEF compile step (vendor tooling). Once a
+`model.hef` artifact lands at `/var/lib/ruvector-hailo/models/all-minilm-l6-v2/`,
+the existing `HailoEmbedder::open` path consumes it without code changes;
+vectors stop being FNV-1a content-hash placeholders and become real
+semantic embeddings.
+
+---
 
 **Validation snapshot (iter 15, 2026-05-01):**
 
