@@ -34,14 +34,42 @@ The 156-iteration arc resolved every SDK bug encountered:
 
 **Production path now has TWO routes**:
 - Option E (cpu-fallback, iter 147): works on any Pi 5, 7 embeds/sec/worker
-- **Option A (NPU acceleration, iter 156b): unblocked! Wire the
-  encoder.hef + host-side embedding lookup + post-NPU pool into
-  `HailoEmbedder::embed`. Expected speedup: 7/sec → ~330/sec/worker
-  (50× from NPU forward pass at ~3 ms vs ~150 ms CPU).**
+- **Option A (NPU acceleration, iter 156b/157): unblocked AND
+  validated on real hardware. SCP'd encoder.hef to cognitum-v0
+  (Pi 5 + AI HAT+) and ran via `hailortcli run`:**
+
+```text
+Running streaming inference (encoder.hef):
+  Transform data: true
+    Type:      auto
+    Quantized: true
+Network minilm_encoder/minilm_encoder: 100% | 5/5 | FPS: 73.41
+> Inference result:
+    FPS: 73.48
+    Send Rate: 28.89 Mbit/s
+    Recv Rate: 28.89 Mbit/s
+```
+
+  **73.4 FPS on the actual NPU forward pass** (encoder only,
+  raw vstream throughput, no host-side overhead).
+  **10× the cpu-fallback rate** (7/sec/worker → 73/sec/worker
+  for the encoder block).
+
+  Adding host-side overhead (tokenize ~0.5ms + embedding lookup
+  ~1-5ms + post-NPU mean-pool + L2-norm ~0.1ms) the realistic
+  end-to-end latency lands ~15-20 ms per embed →
+  **~50-65 embeds/sec single-worker, ~250/sec for a 4-Pi cluster**.
 
 Iter 157+ work: wire the HEF path through `HailoEmbedder` (~150 LOC of
-Rust per the iter-139 estimate). Until then cpu-fallback remains the
-shipping default.
+Rust):
+  1. HEF load via `hailo_create_hef`
+  2. vdevice configure_network_group
+  3. Input/output vstream creation
+  4. Host-side embedding lookup (candle BertEmbeddings layer)
+  5. Tokenize → embed lookup → vstream write → vstream read →
+     dequantize UINT8 → mean-pool with attention mask → L2-normalize
+
+Until that wiring lands cpu-fallback remains the shipping default.
 
 ## 1. Context
 
