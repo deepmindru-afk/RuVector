@@ -21,6 +21,14 @@ hailo = ["ruvector-hailo/hailo"]
 # default — Tailscale already encrypts the wire; opt-in for defense-in-
 # depth or non-Tailscale deploys.
 tls = ["tonic/tls"]
+# Iter 134 — propagate ruvector-hailo's CPU fallback through the cluster
+# so the worker binary picks up `model.safetensors` + `tokenizer.json` +
+# `config.json` and runs real BERT-6 inference on host CPU when no HEF
+# is present. Path C from ADR-167. Adds ~50 MB of compiled deps; off by
+# default so x86 dev hosts that just want to type-check don't pay the
+# cost. Production worker builds turn it on alongside `hailo`:
+#   cargo build --features hailo,cpu-fallback --bin ruvector-hailo-worker
+cpu-fallback = ["ruvector-hailo/cpu-fallback"]
 
 # Standalone (excluded from parent workspace until cluster crate joins).
 [workspace]

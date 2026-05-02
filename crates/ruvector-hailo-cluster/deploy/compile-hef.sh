@@ -30,6 +30,16 @@
 
 set -euo pipefail
 
+# Iter 132/134 — pick up the Hailo Dataflow Compiler venv automatically.
+# setup-hailo-compiler.sh leaves a symlink at ~/.cache/ruvector-hailo-compiler/active
+# pointing at the Python 3.10 venv that owns `hailo` and `optimum-cli`.
+# Prepending it to PATH means a fresh shell can run this script without
+# any manual env wrangling. Operator override: set HAILO_VENV.
+HAILO_VENV="${HAILO_VENV:-$HOME/.cache/ruvector-hailo-compiler/active}"
+if [[ -x "$HAILO_VENV/bin/hailo" ]]; then
+  export PATH="$HAILO_VENV/bin:$PATH"
+fi
+
 OUT="model.hef"
 while [[ $# -gt 0 ]]; do
   case "$1" in
