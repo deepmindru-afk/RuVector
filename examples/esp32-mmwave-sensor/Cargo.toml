@@ -22,6 +22,10 @@ esp-idf-hal = { version = "0.45", default-features = false, features = ["std"] }
 esp-idf-sys = { version = "0.36", default-features = false, features = ["binstart"] }
 log         = "0.4"
 anyhow      = "1"
+# Iter 115: shared mmWave parser crate. no_std + zero-allocation, fits
+# cleanly into the ESP32-S3 firmware image. Same source the host-side
+# bridge consumes — one tested state machine, two callers.
+ruvector-mmwave = { path = "../../crates/ruvector-mmwave" }
 
 [build-dependencies]
 embuild = "0.33"

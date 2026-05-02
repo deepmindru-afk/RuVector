@@ -1198,6 +1198,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ruvector-mmwave"
+version = "0.0.1"
+
+[[package]]
 name = "ruvector-mmwave-sensor"
 version = "0.0.1"
 dependencies = [
@@ -1207,6 +1211,7 @@ dependencies = [
  "esp-idf-svc",
  "esp-idf-sys",
  "log",
+ "ruvector-mmwave",
 ]
 
 [[package]]

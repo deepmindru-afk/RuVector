@@ -1523,6 +1523,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rcgen",
  "ruvector-hailo",
+ "ruvector-mmwave",
  "serde",
  "serde_json",
  "sha2",
@@ -1534,6 +1535,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ruvector-mmwave"
+version = "0.0.1"
 
 [[package]]
 name = "same-file"

@@ -26,7 +26,6 @@
 //! to the `ruvector-hailo` cluster — placeholder hooks are flagged
 //! with `TODO(iter-B)` comments below.
 
-mod parser;
 mod selftest;
 
 use anyhow::Result;
@@ -34,6 +33,10 @@ use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::uart::{config::Config as UartConfig, UartDriver};
 use esp_idf_hal::units::Hertz;
 use log::{error, info, warn};
+// Iter 115: parser now lives in the shared `ruvector-mmwave` crate.
+// Re-aliased as `parser` so the rest of this file (and selftest.rs)
+// keeps reading naturally without churn.
+use ruvector_mmwave as parser;
 use parser::{Event, Mr60Parser};
 use std::time::{Duration, Instant};
 

@@ -1,0 +1,25 @@
+# Shared MR60BHA2 + LD2410 mmWave-radar UART parser. Standalone — both
+# the host-side bridge (`ruvector-hailo-cluster::bin::mmwave-bridge`) and
+# the on-device firmware (`examples/esp32-mmwave-sensor`) path-depend on
+# this crate so the wire-format state machine has exactly one tested
+# implementation.
+
+[workspace]
+
+[package]
+name        = "ruvector-mmwave"
+version     = "0.0.1"
+edition     = "2021"
+description = "Shared parser for Seeed MR60BHA2 + HLK-LD2410 60/24 GHz mmWave radar UART streams (ADR-063)"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ruvnet/ruvector"
+keywords    = ["mmwave", "radar", "ruvector", "edge-ai", "presence"]
+categories  = ["embedded", "parser-implementations"]
+publish     = false
+
+[features]
+default = []
+# `std` enables convenience `Vec`-returning helpers used by the host
+# bridge. The on-device firmware leaves it off so the parser fits in a
+# no_std embedded image. Core state machine is no_std unconditionally.
+std = []

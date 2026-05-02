@@ -1,4 +1,15 @@
-//! MR60BHA2 60 GHz mmWave radar UART frame parser (iter A).
+//! Shared mmWave-radar UART parser crate.
+//!
+//! Lifted out of `examples/esp32-mmwave-sensor/src/parser.rs` (iter
+//! 113-114) into a standalone crate so both the on-device firmware
+//! and the host-side bridge service consume one tested state-machine
+//! implementation. ADR-063 (in `~/projects/RuView`) is the reference
+//! protocol spec.
+//!
+//! `no_std`-compatible: the state machine never allocates and links
+//! cleanly into an `xtensa-esp32s3-espidf` image with default features.
+//! Enable `feature = "std"` for the host bridge to pull in
+//! `Vec`/`String`-using helpers.
 //!
 //! Faithful Rust port of the state machine in
 //! `~/projects/RuView/firmware/esp32-csi-node/main/mmwave_sensor.c`
@@ -29,6 +40,7 @@
 //! Anything else is silently consumed but emitted as `Event::Unknown`
 //! so an operator with `--log-level debug` can see the radar is alive.
 
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![allow(dead_code)]
 
 /// Maximum payload size we reserve in the parser. Real MR60BHA2 frames

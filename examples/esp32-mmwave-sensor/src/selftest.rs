@@ -13,7 +13,7 @@
 //! in static lookup tables. Running the same fixtures on-device proves
 //! the parser is correct in the context where it actually runs.
 
-use crate::parser::{invert_xor_public, Event, Mr60Parser};
+use ruvector_mmwave::{invert_xor_public, Event, Mr60Parser};
 
 /// Build a synthetic MR60BHA2 frame in `out` and return the slice
 /// covering the populated bytes. Mirrors the `frame()` helper used by

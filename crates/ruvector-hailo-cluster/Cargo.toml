@@ -39,6 +39,10 @@ governor           = { version = "0.7", default-features = false, features = ["s
 # ADR-172 §1c iter-107: optional Ed25519 detached signature verification
 # on `--workers-file` manifests. Pure-Rust, no native deps.
 ed25519-dalek      = { version = "2", default-features = false, features = ["std"] }
+# Iter 115: shared mmWave parser. Same source as the ESP32 firmware
+# consumes; the host-side `mmwave-bridge` bin uses it to decode bytes
+# off /dev/ttyUSB* or a synthetic simulator stream.
+ruvector-mmwave    = { path = "../ruvector-mmwave", features = ["std"] }
 tokio-stream       = { version = "0.1", default-features = false, features = ["net"] }
 futures-core       = "0.3"
 serde              = { version = "1", features = ["derive"] }
@@ -67,6 +71,10 @@ path = "src/bin/stats.rs"
 [[bin]]
 name = "ruvector-hailo-cluster-bench"
 path = "src/bin/bench.rs"
+
+[[bin]]
+name = "ruvector-mmwave-bridge"
+path = "src/bin/mmwave-bridge.rs"
 
 [build-dependencies]
 tonic-build         = { version = "0.12", default-features = false, features = ["prost"] }
