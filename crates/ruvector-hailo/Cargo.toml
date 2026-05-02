@@ -15,6 +15,12 @@ categories = ["embedded", "science"]
 default = []
 # Activates the real Hailo NPU runtime path — propagates to hailort-sys.
 hailo = ["hailort-sys/hailo"]
+# Iter 133 path-C: real BERT-6 inference on Cortex-A76 NEON / x86 AVX2
+# via candle. Adds ~50 MB of compiled deps; off by default. When on,
+# `HailoEmbedder::open` falls back to `CpuEmbedder` if no model.hef is
+# found (and only the safetensors / tokenizer.json artifacts are
+# present). Net: real semantic vectors today, NPU stays idle until HEF.
+cpu-fallback = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "serde_json"]
 
 # Standalone (excluded from parent workspace until iteration 11 lands).
 [workspace]
@@ -22,6 +28,15 @@ hailo = ["hailort-sys/hailo"]
 [dependencies]
 thiserror   = "2"
 hailort-sys = { path = "../hailort-sys" }
+# Iter 133 path-C deps (cpu-fallback feature). All optional so the
+# default build doesn't pull them in. candle-transformers brings BERT
+# + sentence-transformers support; tokenizers is HuggingFace's fast
+# WordPiece/BPE crate.
+candle-core         = { version = "0.8", optional = true, default-features = false }
+candle-nn           = { version = "0.8", optional = true, default-features = false }
+candle-transformers = { version = "0.8", optional = true, default-features = false }
+tokenizers          = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+serde_json          = { version = "1", optional = true }
 
 [dev-dependencies]
 anyhow    = "1"

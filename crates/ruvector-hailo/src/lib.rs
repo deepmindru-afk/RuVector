@@ -13,10 +13,16 @@ pub mod error;
 pub mod inference;
 pub mod tokenizer;
 
+#[cfg(feature = "cpu-fallback")]
+pub mod cpu_embedder;
+
 pub use device::HailoDevice;
 pub use error::HailoError;
 pub use inference::{EmbeddingPipeline, l2_normalize, mean_pool, DEFAULT_MAX_SEQ, MINI_LM_DIM};
 pub use tokenizer::{EncodedInput, SpecialIds, WordPieceTokenizer};
+
+#[cfg(feature = "cpu-fallback")]
+pub use cpu_embedder::CpuEmbedder;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -48,7 +54,18 @@ pub struct HailoEmbedder {
     /// Wrapped in `Mutex` so concurrent reads serialize safely; the
     /// libhailort vdevice is documented thread-safe for inference but
     /// thermal reads + future config writes still want serial access.
+    /// Only constructed and read under `feature = "hailo"`; without
+    /// that feature `open()` short-circuits to `FeatureDisabled`.
+    #[allow(dead_code)]
     device: Mutex<crate::device::HailoDevice>,
+    /// Iter 133 — Path C CPU fallback. `Some(_)` when the operator
+    /// has model.safetensors + tokenizer.json + config.json in the
+    /// model dir but no HEF (yet). When set, `embed()` dispatches to
+    /// real BERT-6 inference on the host CPU via candle. NPU stays
+    /// idle — fallback only. Only present when built with
+    /// `--features cpu-fallback`.
+    #[cfg(feature = "cpu-fallback")]
+    cpu_fallback: Option<crate::cpu_embedder::CpuEmbedder>,
 }
 
 impl HailoEmbedder {
@@ -90,10 +107,37 @@ impl HailoEmbedder {
                 v.0, v.1, v.2
             );
 
-            // Pre-declare dim from the constant; once the HEF lands we
-            // read it from the network group's output shape.
+            // Iter 133 path-C: if no model.hef but we DO have the HF
+            // safetensors trio, fall back to real BERT-6 on CPU. The
+            // NPU stays warm (vdevice is open) so once an HEF lands
+            // restart is the only step. `cpu_fallback` is only present
+            // when built with `--features cpu-fallback`.
+            #[cfg(feature = "cpu-fallback")]
+            let cpu_fallback = {
+                let hef_path = model_dir.join("model.hef");
+                let safetensors = model_dir.join("model.safetensors");
+                if !hef_path.exists() && safetensors.exists() {
+                    // BadModelDir errors here propagate up — operator
+                    // sees "missing tokenizer.json" etc. rather than
+                    // a confusing later embed-time failure.
+                    Some(crate::cpu_embedder::CpuEmbedder::open(model_dir)?)
+                } else {
+                    None
+                }
+            };
+
+            // When CPU fallback is active, take its dimension as the
+            // truth (BERT config drives it, not the constant).
+            #[cfg(feature = "cpu-fallback")]
+            let dimensions = cpu_fallback
+                .as_ref()
+                .map(|c| c.output_dim())
+                .unwrap_or(crate::inference::MINI_LM_DIM);
+            #[cfg(not(feature = "cpu-fallback"))]
+            let dimensions = crate::inference::MINI_LM_DIM;
+
             Ok(Self {
-                dimensions: crate::inference::MINI_LM_DIM,
+                dimensions,
                 name: format!(
                     "hailo:{}",
                     model_dir
@@ -103,6 +147,8 @@ impl HailoEmbedder {
                 ),
                 device_id,
                 device: Mutex::new(device),
+                #[cfg(feature = "cpu-fallback")]
+                cpu_fallback,
             })
         }
     }
@@ -160,6 +206,17 @@ impl HailoEmbedder {
         }
         #[cfg(feature = "hailo")]
         {
+            // Iter 133 path-C: when the CPU fallback is loaded,
+            // dispatch to it. Real BERT-6 inference, real semantic
+            // vectors. Slow vs NPU but honest — and the device
+            // handle is intentionally NOT locked here so a future
+            // HEF path can run in parallel with CPU fallback during
+            // a hot-swap.
+            #[cfg(feature = "cpu-fallback")]
+            if let Some(cpu) = &self.cpu_fallback {
+                return cpu.embed(text);
+            }
+
             let _ = text;
             // Hold the device lock briefly — preserves the contract
             // that the real HEF-based inference path needs
@@ -198,6 +255,15 @@ impl HailoEmbedder {
     /// configured into the vdevice. No callers need to change — the
     /// signal flips automatically.
     pub fn has_model(&self) -> bool {
+        // Iter 133 path-C: CPU fallback counts as a loaded model.
+        // The cluster's `validate_fleet` flow correctly marks workers
+        // ready=true when CPU fallback is wired even with no HEF.
+        #[cfg(feature = "cpu-fallback")]
+        {
+            if self.cpu_fallback.is_some() {
+                return true;
+            }
+        }
         false
     }
 
