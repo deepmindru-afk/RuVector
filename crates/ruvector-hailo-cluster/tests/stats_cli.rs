@@ -206,3 +206,158 @@ fn stats_cli_strict_homogeneous_with_no_drift_exits_zero() {
     assert!(!stderr.contains("DRIFT"),
         "stderr must NOT mention DRIFT for homogeneous fleet, got: {}", stderr);
 }
+
+// ---- ADR-172 §1c iter-110 end-to-end CLI coverage ----
+
+/// Build a deterministic ed25519 keypair for the test, format both
+/// pubkey and (later) signature as the lowercase hex the CLI expects.
+fn fixture_signing_key() -> ed25519_dalek::SigningKey {
+    let seed: [u8; 32] = [
+        0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8,
+        0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
+        0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
+        0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+    ];
+    ed25519_dalek::SigningKey::from_bytes(&seed)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut s, "{:02x}", b).unwrap();
+    }
+    s
+}
+
+/// Stage a temp dir with manifest + signature + pubkey files. Returns
+/// the dir path so callers can drop it (TempDir-like, but stdlib only
+/// to avoid a tempfile dev-dep). Caller is expected to clean up.
+fn write_manifest_fixture(manifest_body: &str) -> std::path::PathBuf {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir()
+        .join(format!("ruvector-stats-mfsig-{}-{}",
+            std::process::id(),
+            // Distinguish parallel tests from each other.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Write manifest
+    let mut mf = std::fs::File::create(dir.join("workers.txt")).unwrap();
+    mf.write_all(manifest_body.as_bytes()).unwrap();
+    drop(mf);
+
+    let sk = fixture_signing_key();
+    let pk_hex = hex_lower(sk.verifying_key().as_bytes());
+    use ed25519_dalek::Signer;
+    let sig_hex = hex_lower(&sk.sign(manifest_body.as_bytes()).to_bytes());
+
+    std::fs::write(dir.join("workers.sig"), sig_hex).unwrap();
+    std::fs::write(dir.join("pubkey.hex"), pk_hex).unwrap();
+    dir
+}
+
+#[test]
+fn stats_cli_signed_workers_file_succeeds_with_matching_sig() {
+    let port = free_port();
+    let mut worker = spawn_fakeworker(port, 4, "fp:signed");
+
+    let body = format!("pi-0 = 127.0.0.1:{}\n", port);
+    let dir = write_manifest_fixture(&body);
+    let manifest = dir.join("workers.txt");
+    let sig = dir.join("workers.sig");
+    let pk = dir.join("pubkey.hex");
+
+    let out = Command::new(STATS)
+        .args([
+            "--workers-file", manifest.to_str().unwrap(),
+            "--workers-file-sig", sig.to_str().unwrap(),
+            "--workers-file-pubkey", pk.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run stats");
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        out.status.success(),
+        "signed manifest should succeed, exit={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("fp:signed"), "expected worker fp in TSV: {}", stdout);
+}
+
+#[test]
+fn stats_cli_tampered_workers_file_fails_signature_check() {
+    let port = free_port();
+    let mut worker = spawn_fakeworker(port, 4, "fp:tamper");
+
+    // Sign one body, then tamper before invoking stats.
+    let original = format!("pi-0 = 127.0.0.1:{}\n", port);
+    let dir = write_manifest_fixture(&original);
+    let manifest = dir.join("workers.txt");
+    // Overwrite manifest with a different body — sig no longer matches.
+    let tampered = format!("pi-0 = 127.0.0.1:{}\npi-rogue = 10.0.0.99:50051\n", port);
+    std::fs::write(&manifest, &tampered).unwrap();
+
+    let sig = dir.join("workers.sig");
+    let pk = dir.join("pubkey.hex");
+
+    let out = Command::new(STATS)
+        .args([
+            "--workers-file", manifest.to_str().unwrap(),
+            "--workers-file-sig", sig.to_str().unwrap(),
+            "--workers-file-pubkey", pk.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run stats");
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!out.status.success(), "tampered manifest must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("signature verification failed") || stderr.contains("manifest_sig"),
+        "stderr should reference the verification failure: {}",
+        stderr
+    );
+}
+
+#[test]
+fn stats_cli_partial_signature_config_is_refused() {
+    // Only --workers-file-sig set, --workers-file-pubkey omitted.
+    // Must fail before any RPC fires (the gate happens at flag-parse
+    // time in the bin's discovery construction).
+    let body = "pi-0 = 127.0.0.1:65535\n";
+    let dir = write_manifest_fixture(body);
+    let manifest = dir.join("workers.txt");
+    let sig = dir.join("workers.sig");
+
+    let out = Command::new(STATS)
+        .args([
+            "--workers-file", manifest.to_str().unwrap(),
+            "--workers-file-sig", sig.to_str().unwrap(),
+            // intentionally no --workers-file-pubkey
+        ])
+        .output()
+        .expect("run stats");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!out.status.success(), "partial config must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ADR-172 §1c") || stderr.contains("must both be set"),
+        "stderr should reference the gate: {}",
+        stderr
+    );
+}
