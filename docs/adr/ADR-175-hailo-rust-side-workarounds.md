@@ -85,19 +85,36 @@ publicly documented.
 tested), then feed it to `runner.compile()` directly, claiming it's
 already in INT8.
 
-**Catch**: `runner.compile()` checks the HN state and refuses to
-compile non-quantized inputs (we saw "Model requires quantized weights
-in order to run on HW, but none were given" in iter 142b). We'd need
-to either:
-- Reverse-engineer the HN JSON format and write a Rust generator that
+**Iter 149 probe**: tried this. `onnxruntime.quantize_dynamic` on the
+encoder ONNX produced an 11 MB QInt8 file (from 43 MB FP32). Hailo's
+parser then **rejected the ONNX-Runtime quantization ops**:
+```
+UnsupportedOperationError in op hidden_states_QuantizeLinear:
+  DynamicQuantizeLinear operation is unsupported
+UnsupportedOperationError in op /encoder/layer.0/attention/self/key/MatMul_quant:
+  MatMulInteger operation is unsupported
+```
+
+So the parser only accepts FP32 ONNX and expects to do its OWN
+quantization (which is the broken `_decompose_layer_norm` /
+`ElementwiseAddDirectOp` path). Possible follow-up: try
+`quantize_static` (produces `QLinearConv` / `QLinearMatMul`
+which are standard ONNX ops; Hailo might recognize those). Untested.
+
+**Catch beyond the parser**: even if a quantized ONNX parses,
+`runner.compile()` checks the HN state and refuses non-quantized
+inputs (we saw "Model requires quantized weights in order to run on HW,
+but none were given" in iter 142b). We'd need to either:
+- Reverse-engineer the HN JSON format and write a generator that
   produces it directly (skipping ONNX → HN translation), or
 - Patch the SDK to accept onnxruntime-quantized weights.
 
 **Effort**: weeks of investigation + likely Hailo support engagement
-to understand HN file format; may end up needing the same fix as
-Option A anyway.
+to understand the HN file format; may end up needing the same fix
+as Option A anyway.
 
-**Recommendation**: park until Option A timeline is clearer.
+**Recommendation**: park until Option A timeline is clearer. Iter 149
+probe confirmed the parser-level blocker.
 
 ### Option D — Use Hailo-8 for matrix multiplication ops only
 
@@ -142,9 +159,21 @@ pool=4 vs single Mutex):
 | p50 latency | 279 ms | **175 ms** | **−37%** |
 | p99 latency | 582 ms | **279 ms** | **−52%** |
 
-On Pi 5 (4 Cortex-A76 cores) the speedup should be closer to 4×
-since the bottleneck is pure CPU compute rather than lock contention
-on a many-core x86 host.
+**Real Pi 5 measurements** (iter 149, deployed cross-built aarch64
+release binary on cognitum-v0, pool=4, concurrency=4 from x86 client):
+
+| Metric | Pi 5 |
+|---|---:|
+| throughput | 7.0 / sec |
+| p50 latency | 572 ms |
+| p99 latency | 813 ms |
+
+A76 cores split 4 ways are memory-bandwidth limited so the per-call
+latency goes UP under concurrent load (vs single-thread which would
+be ~150-200ms). Aggregate throughput at 4 workers (4-Pi cluster):
+~28 embeds/sec, which covers most ingest workloads. Self-test embed
+at startup confirms the model loads + first inference works
+(`startup self-test embed ok dim=384`).
 
 **Memory cost**: ~100 MB resident at pool=4 (vs 90 MB at pool=1) —
 the safetensors mmap dominates and is shared.

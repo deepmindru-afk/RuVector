@@ -19,22 +19,26 @@
 //! `sentence-transformers/all-MiniLM-L6-v2`. No HEF / Hailo Dataflow
 //! Compiler dependency.
 //!
-//! # Realistic latency (measured iter 140 — release build)
+//! # Realistic latency (measured iter 149 on real hardware)
 //!
 //! AMD Ryzen 9 9950X (AVX2/AVX-512 x86_64), 128-token sequence:
 //!   * cold first embed:  ~45 ms (model warm-up + JIT)
 //!   * warm steady-state: ~38-40 ms
-//!   * sustained: ~25.7 embeds/sec (mutex serializes BertModel access;
-//!     concurrent clients queue rather than parallelize)
+//!   * sustained throughput, pool=1: 25.7 embeds/sec
+//!   * sustained throughput, pool=4: **45.0 embeds/sec** (1.75×)
 //!
-//! Cortex-A76 @ 2.4 GHz on Pi 5 (estimated, scaled by SPECint ratio):
-//!   * ~150-300 ms warm steady-state
-//!   * ~3-5 embeds/sec per worker
+//! Pi 5 (Cortex-A76 @ 2.4 GHz, 4 cores), measured against deployed
+//! aarch64 release build:
+//!   * cold first embed:  ~510 ms (model load + JIT)
+//!   * warm steady-state: ~570 ms p50
+//!   * sustained throughput, pool=4: **7.0 embeds/sec** at 4 concurrent clients
+//!     (latency p50=572ms, p99=813ms — A76 cores split between 4 parallel
+//!     forwards; memory bandwidth limits keep us at ~70% of theoretical)
 //!
 //! Slow vs Hailo's 1-3 ms NPU target, but real semantic vectors today.
-//! Scale horizontally by adding workers — the cluster's P2C+EWMA
-//! dispatcher distributes load and a 4-worker Pi cluster gets you to
-//! ~12-20 embeds/sec which covers most ingest workloads.
+//! Scale horizontally with workers — a 4-worker Pi cluster reaches
+//! **~28 embeds/sec aggregate** (each contributes 7/sec via pool=4),
+//! which covers most ingest workloads.
 
 #![cfg(feature = "cpu-fallback")]
 
