@@ -48,6 +48,12 @@
 //!                              floor 8). Caps unprocessed RST_STREAM
 //!                              frames; once exceeded, the server
 //!                              sends GOAWAY and closes the connection.
+//!   RUVECTOR_HTTP2_KEEPALIVE_SECS  HTTP/2 keepalive ping interval
+//!                              (ADR-172 §3a iter 184 — default 60,
+//!                              floor 10, 0 = disabled). Reclaims
+//!                              half-closed TCP state from crashed or
+//!                              partitioned clients; pong timeout is
+//!                              hyper's default 20 s.
 //!
 //! When both `RUVECTOR_TLS_CERT` and `RUVECTOR_TLS_KEY` are set and the
 //! binary was built with `--features tls`, the worker serves over HTTPS
@@ -585,10 +591,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_pending_resets,
             "HTTP/2 max_pending_accept_reset_streams set (ADR-172 §3a iter 183 CVE-2023-44487 gate)"
         );
+        // Iter 184 — HTTP/2 keepalive ping. tonic's default is no
+        // keepalive, so a half-closed TCP connection (client crashed,
+        // NAT mid-flow drop, network partition) sits in the worker's
+        // accept table indefinitely, holding stream state. With a
+        // 60 s ping interval the worker probes idle peers; if no PONG
+        // arrives within the (hyper-default) 20 s timeout, the
+        // connection is closed and its state reclaimed. Operators can
+        // tune via `RUVECTOR_HTTP2_KEEPALIVE_SECS`; 0 disables the
+        // feature for environments where ping traffic is undesirable
+        // (e.g. cellular metering). Floor 10 s so a misconfig can't
+        // saturate the link with pings.
+        let keepalive_secs: u64 = std::env::var("RUVECTOR_HTTP2_KEEPALIVE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        let keepalive = if keepalive_secs == 0 {
+            info!("HTTP/2 keepalive disabled (RUVECTOR_HTTP2_KEEPALIVE_SECS=0)");
+            None
+        } else {
+            let v = keepalive_secs.max(10);
+            info!(
+                http2_keepalive_secs = v,
+                "HTTP/2 keepalive enabled (ADR-172 §3a iter 184 dead-peer reclaim)"
+            );
+            Some(Duration::from_secs(v))
+        };
         let mut server = Server::builder()
             .max_concurrent_streams(Some(max_streams))
             .timeout(Duration::from_secs(request_timeout_secs))
-            .http2_max_pending_accept_reset_streams(Some(max_pending_resets));
+            .http2_max_pending_accept_reset_streams(Some(max_pending_resets))
+            .http2_keepalive_interval(keepalive);
         #[cfg(feature = "tls")]
         {
             // Both vars must be set to opt-in. A partial config (cert
