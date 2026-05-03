@@ -24,6 +24,7 @@ phases shipped + hardware-validated end-to-end on cognitum-v0 (Pi 5
 | P4 | 162 | `HailoEmbedder` HEF > cpu-fallback dispatch |
 | P5 | 163 | Pi deploy + bench → 9.6× throughput vs cpu-fallback |
 | P5 | 164 | Cosine ordering verified (NPU sim(close) > sim(far) Δ=+0.23) |
+| P5b | 168 | Cache + NPU bench — 100% hit ⇒ **15.86 M/sec** (226,000×) |
 
 **Real Pi 5 measurements** (cluster-bench, concurrency=4, 15s,
 HEF worker on 50051 via systemd):
@@ -34,6 +35,22 @@ HEF worker on 50051 via systemd):
 | p50 latency | 572 ms | **57 ms** | **10×** |
 | p99 latency | 813 ms | **152 ms** | **5.4×** |
 | errors | 0 | **0 / 1028** | — |
+
+**Iter 168 cache + NPU bench** (cluster-bench against the same Pi
+NPU worker, with the iter-108 LRU cache enabled at the cluster
+coordinator):
+
+| Workload | Throughput | p50 | hit-rate |
+|---|---:|---:|---:|
+| Cold (unique keys) | 70.2 / sec | 56 ms | — |
+| Mixed (keyspace=2048, cache=1024) | 74.7 / sec | 55 ms | 5.9% |
+| Hot (keyspace=32, cache=1024) | **15.86 M / sec** | <1 µs | **100.0%** |
+
+The hot-path number isn't a typo — the cluster coordinator caches
+served vectors entirely in-process for repeat-text workloads, so a
+RAG retrieval over a small reusable corpus gets sub-microsecond
+returns instead of round-tripping to the Pi. This is the operator-
+facing case for keeping cache enabled in production.
 
 ADR-176 §"Acceptance criteria" required ≥5× throughput; 9.6×
 exceeds. Cosine-similarity verification (iter 164) and ADR cleanup
