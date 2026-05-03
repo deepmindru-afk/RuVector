@@ -61,6 +61,15 @@
 //!                              half-closed TCP state from crashed or
 //!                              partitioned clients; pong timeout is
 //!                              hyper's default 20 s.
+//!   RUVECTOR_MAX_BATCH_SIZE   Cap on EmbedBatchRequest.texts.len()
+//!                              (ADR-172 §3a iter 199 — default 256,
+//!                              floor 1). Bounds the per-RPC NPU work
+//!                              an attacker can force; iter-180 byte
+//!                              cap alone allowed ~16 k tightly-packed
+//!                              tiny texts inside a single request,
+//!                              which would tie up the worker for
+//!                              minutes. Returns InvalidArgument when
+//!                              exceeded.
 //!   RUVECTOR_SHUTDOWN_FORCE_CLEAN  When "1", attempt the clean
 //!                              HailoRT teardown on shutdown
 //!                              (iter 185 — default off). The default
@@ -177,6 +186,15 @@ struct WorkerService {
     /// Iter-105: shared denial counter — bumped by the interceptor
     /// closure on every Status::resource_exhausted, read by `get_stats`.
     rate_limit_denials: Arc<AtomicU64>,
+    /// Iter 199 — cap on the number of texts in a single
+    /// `embed_stream` (EmbedBatchRequest) RPC. The iter-180 byte cap
+    /// bounds the encoded request size at 64 KB, but tightly packed
+    /// 1-byte texts can fit ~16 k entries inside that — and each
+    /// entry triggers a serial ~14 ms NPU embed, holding the connection
+    /// for ~228 s. Capping the batch length closes that loop without
+    /// affecting any legitimate caller (iter-179 streaming sweep
+    /// peaked at b=16). Env: RUVECTOR_MAX_BATCH_SIZE.
+    max_batch_size: usize,
     /// Process start time, for uptime reporting in GetStats.
     start: Instant,
     /// Atomic counters surfaced via GetStats.
@@ -284,6 +302,26 @@ impl Embedding for WorkerService {
         tracing::Span::current()
             .record("batch_size", n)
             .record("request_id", req_id_field);
+        // Iter 199 — refuse oversized batches before we spawn the
+        // serial embed task. Without this an attacker fitting tightly
+        // packed 1-byte texts inside the iter-180 64 KB request cap
+        // could enqueue ~16 k embeds, each ~14 ms NPU time, holding
+        // the connection for ~228 s (well past the iter-182 30 s RPC
+        // timeout — but that just kicks the connection, doesn't
+        // unblock the in-flight FFI work). Capping the length surfaces
+        // the gate as InvalidArgument instantly.
+        if n > self.max_batch_size {
+            warn!(
+                batch_size = n,
+                max_batch_size = self.max_batch_size,
+                "embed_stream batch too large — rejecting"
+            );
+            return Err(Status::invalid_argument(format!(
+                "batch size {} exceeds max {} (ADR-172 §3a iter 199; \
+                 tune via RUVECTOR_MAX_BATCH_SIZE)",
+                n, self.max_batch_size
+            )));
+        }
         info!("worker embed_stream");
 
         let embedder = Arc::clone(&self.embedder);
@@ -532,6 +570,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Arc<AtomicU64> is the cheapest correct sharing.
     let rate_limit_denials = Arc::new(AtomicU64::new(0));
 
+    // Iter 199 — cap on EmbedBatchRequest.texts.len(). Read here so
+    // the value is logged at startup alongside the iter-180/181/182/
+    // 183/184/190 gates. Default 256 is well above iter-179's
+    // observed peak (b=16); floor 1 keeps the streaming RPC viable
+    // under any misconfig.
+    let max_batch_size: usize = std::env::var("RUVECTOR_MAX_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(256)
+        .max(1);
+    info!(
+        max_batch_size,
+        "embed_stream batch-size cap set (ADR-172 §3a iter 199 DoS gate)"
+    );
+
     // Iter 185 — keep an outer Arc<HailoEmbedder> ref so the FFI
     // teardown happens on the main thread, after the tokio runtime
     // has drained, instead of inside the async runtime where it
@@ -550,6 +603,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_text_content,
         rate_limiter: Arc::clone(&rate_limiter),
         rate_limit_denials: Arc::clone(&rate_limit_denials),
+        max_batch_size,
         start: Instant::now(),
         embed_ok: AtomicU64::new(0),
         embed_err: AtomicU64::new(0),
