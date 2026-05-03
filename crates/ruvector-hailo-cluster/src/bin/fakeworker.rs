@@ -202,7 +202,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     rt.block_on(async move {
-        let mut server = Server::builder();
+        // Iter 192 — DoS-gate parity with the real worker. iter-180
+        // through iter-184 + iter-190 layered six caps onto the gRPC
+        // server (byte cap, stream cap, RPC timeout, rapid-reset cap,
+        // keepalive, encode cap). fakeworker is the test-fleet stand-
+        // in and was running with all defaults wide open, which meant
+        // no integration test exercised the gate behavior — a future
+        // change that loosened a cap on the real worker but tightened
+        // it on fakeworker (or vice versa) would have escaped review.
+        // Mirror the same env vars + the same defaults so a deploy
+        // that runs both in the same env stays consistent.
+        let max_req_bytes: usize = std::env::var("RUVECTOR_MAX_REQUEST_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024)
+            .max(4 * 1024);
+        let max_resp_bytes: usize = std::env::var("RUVECTOR_MAX_RESPONSE_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16 * 1024)
+            .max(4 * 1024);
+        let max_streams: u32 = std::env::var("RUVECTOR_MAX_CONCURRENT_STREAMS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(256)
+            .max(8);
+        let request_timeout_secs: u64 = std::env::var("RUVECTOR_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30)
+            .max(2);
+        let max_pending_resets: usize = std::env::var("RUVECTOR_MAX_PENDING_RESETS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(32)
+            .max(8);
+        let keepalive_secs: u64 = std::env::var("RUVECTOR_HTTP2_KEEPALIVE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        let keepalive = if keepalive_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(keepalive_secs.max(10)))
+        };
+        info!(
+            max_request_bytes = max_req_bytes,
+            max_response_bytes = max_resp_bytes,
+            max_concurrent_streams = max_streams,
+            request_timeout_secs,
+            max_pending_resets,
+            http2_keepalive_secs = keepalive_secs,
+            "fakeworker DoS-gate parity (iter 192)"
+        );
+        let mut server = Server::builder()
+            .max_concurrent_streams(Some(max_streams))
+            .timeout(Duration::from_secs(request_timeout_secs))
+            .http2_max_pending_accept_reset_streams(Some(max_pending_resets))
+            .http2_keepalive_interval(keepalive);
         // Iter 121: TLS parity with the real worker (iter 99). Same
         // env-var contract: RUVECTOR_TLS_CERT + RUVECTOR_TLS_KEY both
         // set → TLS active. Either one alone is a misconfig and
@@ -238,8 +295,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         info!(addr = %bind, "ruvector-hailo-fakeworker serving");
+        // Iter 192 — apply the byte/encode caps to the generated
+        // EmbeddingServer (same pattern as iter 180/190 on the real
+        // worker). `with_interceptor` would re-build the inner with
+        // defaults, but fakeworker has no interceptor, so we just
+        // hand the configured server straight to add_service.
+        let embed_server = EmbeddingServer::new(svc)
+            .max_decoding_message_size(max_req_bytes)
+            .max_encoding_message_size(max_resp_bytes);
         server
-            .add_service(EmbeddingServer::new(svc))
+            .add_service(embed_server)
             .serve_with_shutdown(bind, shutdown_signal())
             .await
             .map_err(|e| format!("serve: {}", e))?;
