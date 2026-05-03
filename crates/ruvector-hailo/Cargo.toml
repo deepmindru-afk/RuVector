@@ -28,6 +28,11 @@ cpu-fallback = ["candle-core", "candle-nn", "candle-transformers", "tokenizers",
 [dependencies]
 thiserror   = "2"
 hailort-sys = { path = "../hailort-sys" }
+# Iter 174 — opt-in HEF sha256 pin via RUVECTOR_HEF_SHA256. Used only
+# under `feature = "hailo"` (the only path that loads HEFs); see
+# hef_pipeline.rs. Keep default-features off to inherit the same
+# minimal sha2 surface the cluster crate uses.
+sha2        = { version = "0.10", default-features = false }
 # Iter 133 path-C deps (cpu-fallback feature). All optional so the
 # default build doesn't pull them in. candle-transformers brings BERT
 # + sentence-transformers support; tokenizers is HuggingFace's fast

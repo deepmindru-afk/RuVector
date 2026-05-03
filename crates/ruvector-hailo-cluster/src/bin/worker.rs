@@ -12,6 +12,11 @@
 //!                            * NPU path:  model.hef + vocab.txt + special_tokens.json
 //!                            * cpu-fallback (iter 134): model.safetensors + tokenizer.json + config.json
 //!                          Worker auto-detects which is present.
+//!   RUVECTOR_HEF_SHA256    optional sha256 hex digest pin (iter 174).
+//!                          When set, worker hashes model.hef at boot
+//!                          and refuses to start on mismatch. Costs
+//!                          ~16ms on Pi 5 NEON; layered with iter-173
+//!                          magic check + iter-143 cluster fingerprint.
 //!                          (default ./models/all-minilm-l6-v2)
 //!   RUVECTOR_TLS_CERT      path to PEM server cert        (TLS — feature `tls`)
 //!   RUVECTOR_TLS_KEY       path to PEM server private key (TLS — feature `tls`)

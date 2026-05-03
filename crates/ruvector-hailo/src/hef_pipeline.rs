@@ -115,7 +115,18 @@ impl HefPipeline {
         // Costs ~4 bytes of read + a memcmp; sub-microsecond at boot.
         // The iter-143 fingerprint is the cluster-wide drift gate; this
         // is the per-worker "is this even a HEF" gate.
+        //
+        // Iter 174 — opt-in pre-pinned sha256 verification. Operators
+        // set RUVECTOR_HEF_SHA256 in the env file (e.g. to the published
+        // GitHub Release sha256 from iter 169). At boot, before passing
+        // the path to libhailort, we hash the file and compare. Catches
+        // a substituted HEF that satisfies the magic check but isn't
+        // the artifact the operator expected to deploy.
+        // sha256 on Pi 5 NEON ~1 GB/s; 15.7 MB HEF costs ~16 ms — well
+        // within the iter-173 ~1s boot budget. Skipped when env var is
+        // unset (back-compat: default deploys retain iter-173 behavior).
         const HEF_MAGIC: [u8; 4] = [0x01, b'H', b'E', b'F'];
+        let pinned_sha256 = std::env::var("RUVECTOR_HEF_SHA256").ok();
         let mut header = [0u8; 4];
         use std::io::Read as _;
         let mut f = std::fs::File::open(hef_path).map_err(|e| {
@@ -129,6 +140,33 @@ impl HefPipeline {
                 path: hef_path.display().to_string(),
                 what: "model.hef magic mismatch — not a Hailo HEF",
             });
+        }
+        if let Some(want) = pinned_sha256 {
+            // Re-open + stream-hash the whole file. We don't keep the
+            // 15.7 MB in RAM — sha2 is updated chunk-by-chunk.
+            use sha2::{Digest, Sha256};
+            let mut f2 = std::fs::File::open(hef_path).map_err(|e| {
+                HailoError::Tokenizer(format!("open HEF for sha256: {}", e))
+            })?;
+            let mut h = Sha256::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = f2.read(&mut buf).map_err(|e| {
+                    HailoError::Tokenizer(format!("read HEF for sha256: {}", e))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            let got = format!("{:x}", h.finalize());
+            let want_norm = want.trim().to_lowercase();
+            if got != want_norm {
+                return Err(HailoError::BadModelDir {
+                    path: hef_path.display().to_string(),
+                    what: "model.hef sha256 mismatch — RUVECTOR_HEF_SHA256 pin failed",
+                });
+            }
         }
         drop(f);
 
