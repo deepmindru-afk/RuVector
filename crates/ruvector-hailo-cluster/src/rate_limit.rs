@@ -190,10 +190,25 @@ mod tests {
         assert!(RateLimiter::new(0, 0).is_none());
     }
 
+    // Iter 197 — both tests below mutate the same process-global env
+    // vars (`RUVECTOR_RATE_LIMIT_RPS` / `_BURST`). Cargo runs tests in
+    // parallel by default, so without serialization the wipe in
+    // `from_env_disabled_when_unset` could race the set in
+    // `from_env_picks_up_rps_with_default_burst` and either test
+    // could see the other's mutation mid-flight. iter-190's session
+    // sweep caught this as an intermittent failure (1 in N runs).
+    // Process-local Mutex acquired for the duration of each env-
+    // touching test serializes access without pulling a heavyweight
+    // crate like `serial_test`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn from_env_disabled_when_unset() {
-        // Wipe both — Rust runs tests in parallel by default but env is
-        // process-global. We use unique names so this test doesn't race.
+        let _guard = env_lock();
         unsafe {
             std::env::remove_var("RUVECTOR_RATE_LIMIT_RPS");
             std::env::remove_var("RUVECTOR_RATE_LIMIT_BURST");
@@ -203,6 +218,7 @@ mod tests {
 
     #[test]
     fn from_env_picks_up_rps_with_default_burst() {
+        let _guard = env_lock();
         // Set both -> Some(_); rps non-zero is the only requirement.
         unsafe {
             std::env::set_var("RUVECTOR_RATE_LIMIT_RPS", "5");
