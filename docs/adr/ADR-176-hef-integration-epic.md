@@ -11,10 +11,32 @@ related: [ADR-167, ADR-172, ADR-173, ADR-175]
 
 ## Status
 
-**In progress** as of iter 158 (2026-05-03). Iter 156b/157 produced
-and validated the encoder HEF on real hardware (73.4 FPS on
-cognitum-v0). This EPIC tracks the remaining Rust integration work
-to make NPU acceleration the production-default embedding path.
+**Acceptance criteria met as of iter 163 (2026-05-03).** All six
+phases shipped + hardware-validated end-to-end on cognitum-v0 (Pi 5
++ AI HAT+):
+
+| Phase | Iter | Deliverable |
+|---|---:|---|
+| P0 | 152 | Pi dev environment ready (HailoRT 4.23 + udev + systemd) |
+| P1 | 158-159 | `HefPipeline` HEF load + vstreams + FP32 forward |
+| P2 | 160 | `HostEmbeddings` candle-based BERT embedding lookup |
+| P3 | 161 | `HefEmbedder` end-to-end pipeline composition |
+| P4 | 162 | `HailoEmbedder` HEF > cpu-fallback dispatch |
+| P5 | 163 | Pi deploy + bench → 9.6× throughput vs cpu-fallback |
+
+**Real Pi 5 measurements** (cluster-bench, concurrency=4, 15s,
+HEF worker on 50051 via systemd):
+
+| Metric | cpu-fallback (iter 149) | NPU HEF (iter 163) | Δ |
+|---|---:|---:|---:|
+| throughput | 7.0 / sec | **67.3 / sec** | **9.6× ✓** |
+| p50 latency | 572 ms | **57 ms** | **10×** |
+| p99 latency | 813 ms | **152 ms** | **5.4×** |
+| errors | 0 | **0 / 1028** | — |
+
+ADR-176 §"Acceptance criteria" required ≥5× throughput; 9.6×
+exceeds. Cosine-similarity verification (iter 164) and ADR cleanup
+(iter 165) follow.
 
 ## Why this is an EPIC, not a single iteration
 
