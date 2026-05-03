@@ -102,6 +102,88 @@ async fn start_capped_server(cap_bytes: usize) -> SocketAddr {
     addr
 }
 
+/// Iter 194 — companion fixture for iter-190's
+/// `max_encoding_message_size`. Stands up a worker whose `embed`
+/// handler returns a deliberately large `Vec<f32>` so the encoding
+/// cap is the only gate between the response and the wire.
+#[derive(Default, Clone)]
+struct OversizedResponseMockWorker;
+
+#[tonic::async_trait]
+impl Embedding for OversizedResponseMockWorker {
+    async fn embed(
+        &self,
+        _request: Request<EmbedRequest>,
+    ) -> Result<Response<EmbedResponse>, Status> {
+        // 4 000 floats × 4 B = 16 KB raw payload, well above the
+        // 4 KB encoding cap the test installs below. prost framing
+        // adds a few bytes more, so the encoding will trip the cap
+        // even after compression hints.
+        Ok(Response::new(EmbedResponse {
+            vector: vec![0.0; 4_000],
+            dim: 4_000,
+            latency_us: 0,
+        }))
+    }
+
+    async fn health(
+        &self,
+        _request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        Ok(Response::new(HealthResponse {
+            version: "dos-encode-mock".into(),
+            device_id: "dos-encode:0".into(),
+            model_fingerprint: "fp:dos-encode".into(),
+            ready: true,
+            npu_temp_ts0_celsius: 0.0,
+            npu_temp_ts1_celsius: 0.0,
+        }))
+    }
+
+    type EmbedStreamStream = Pin<
+        Box<dyn futures_core::Stream<Item = Result<EmbedStreamResponse, Status>> + Send + 'static>,
+    >;
+
+    async fn embed_stream(
+        &self,
+        _request: Request<EmbedBatchRequest>,
+    ) -> Result<Response<Self::EmbedStreamStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<EmbedStreamResponse, Status>>(1);
+        drop(tx);
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    async fn get_stats(
+        &self,
+        _request: Request<StatsRequest>,
+    ) -> Result<Response<StatsResponse>, Status> {
+        Ok(Response::new(StatsResponse::default()))
+    }
+}
+
+/// Iter 194 — stand up an EmbeddingServer with the encoding cap set
+/// (mirrors `start_capped_server` for the iter-180 byte cap). Returns
+/// the bound addr once the listener is accepting.
+async fn start_encoding_capped_server(cap_bytes: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpListenerStream::new(listener);
+
+    let svc =
+        EmbeddingServer::new(OversizedResponseMockWorker).max_encoding_message_size(cap_bytes);
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(incoming)
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embed_request_above_decoding_cap_returns_out_of_range() {
     // Cap chosen deliberately small so a tiny test payload trips it.
@@ -169,4 +251,71 @@ async fn embed_request_below_decoding_cap_succeeds() {
     let resp = client.embed(req).await.expect("under-cap embed should succeed");
     let body = resp.into_inner();
     assert_eq!(body.dim, 384, "echo mock returns dim=384");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embed_response_above_encoding_cap_returns_error() {
+    // Iter 190's max_encoding_message_size cap. Mock worker emits a
+    // 16 KB Vec<f32>; cap at 4 KB; the server-side encoder rejects
+    // before the response hits the wire and surfaces an error to the
+    // client. tonic returns `OutOfRange` (same shape as the decoding
+    // cap) once the encoded length would exceed the limit.
+    let cap = 4 * 1024;
+    let addr = start_encoding_capped_server(cap).await;
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", addr))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2));
+    let channel = endpoint.connect().await.expect("connect");
+    let mut client = EmbeddingClient::new(channel);
+
+    let req = tonic::Request::new(EmbedRequest {
+        text: "small request, oversized response".into(),
+        max_seq: 128,
+        request_id: "dos-encode-test".into(),
+    });
+
+    let err = client
+        .embed(req)
+        .await
+        .expect_err("oversized response must be rejected by the encoding cap");
+
+    assert_eq!(
+        err.code(),
+        Code::OutOfRange,
+        "encoding-cap rejection should surface as OutOfRange; got {:?} \
+         with message {:?}",
+        err.code(),
+        err.message(),
+    );
+    let msg = err.message();
+    assert!(
+        msg.contains("encoded message length too large") || msg.contains(&cap.to_string()),
+        "OutOfRange status should mention the encoding limit; got message {:?}",
+        msg
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embed_response_under_encoding_cap_succeeds() {
+    // Counterpart: 16 KB cap with the same 16 KB raw response would
+    // be borderline, so cap at 64 KB (production default) and the
+    // 16 KB mock response sails through cleanly.
+    let cap = 64 * 1024;
+    let addr = start_encoding_capped_server(cap).await;
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", addr))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2));
+    let channel = endpoint.connect().await.expect("connect");
+    let mut client = EmbeddingClient::new(channel);
+
+    let req = tonic::Request::new(EmbedRequest {
+        text: "small request, under-cap response".into(),
+        max_seq: 128,
+        request_id: "dos-encode-ok".into(),
+    });
+
+    let resp = client.embed(req).await.expect("response must fit under cap");
+    let body = resp.into_inner();
+    assert_eq!(body.dim, 4_000, "oversized mock returns dim=4000");
+    assert_eq!(body.vector.len(), 4_000, "vector length matches dim");
 }
