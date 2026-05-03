@@ -37,6 +37,12 @@
 //!                              floor 8). Caps in-flight streams per
 //!                              connection so a single attacker socket
 //!                              can't pump unbounded RPCs at the worker.
+//!   RUVECTOR_REQUEST_TIMEOUT_SECS  Per-RPC handler timeout
+//!                              (ADR-172 §3a iter 182 — default 30,
+//!                              floor 2). Bounds slow-loris attacks
+//!                              and any handler that hangs past the
+//!                              30× p99 headroom. tonic returns
+//!                              Status::cancelled when it fires.
 //!
 //! When both `RUVECTOR_TLS_CERT` and `RUVECTOR_TLS_KEY` are set and the
 //! binary was built with `--features tls`, the worker serves over HTTPS
@@ -49,7 +55,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -537,7 +543,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_concurrent_streams = max_streams,
             "HTTP/2 max_concurrent_streams set (ADR-172 §3a iter 181 DoS gate)"
         );
-        let mut server = Server::builder().max_concurrent_streams(Some(max_streams));
+        // Iter 182 — per-RPC handler timeout. tonic's default is no
+        // bound, so a slow-loris client could hold a stream open
+        // indefinitely with a single byte trickle. The HailoRT FFI
+        // section of the embed handler is fully synchronous (no .await
+        // mid-FFI), so timeout cancellation can only land before the
+        // Mutex acquire or after the response build — neither leaks
+        // NPU resources. Iter-179 measured p99=153 ms unary and
+        // p99=910 ms at b=16; 30 s gives 30× headroom over the worst
+        // observed legit RPC. Operators can tune via
+        // `RUVECTOR_REQUEST_TIMEOUT_SECS`; floor 2 s so a misconfig
+        // can't kill normal embeds.
+        let request_timeout_secs: u64 = std::env::var("RUVECTOR_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30)
+            .max(2);
+        info!(
+            request_timeout_secs,
+            "per-RPC handler timeout set (ADR-172 §3a iter 182 slow-loris gate)"
+        );
+        let mut server = Server::builder()
+            .max_concurrent_streams(Some(max_streams))
+            .timeout(Duration::from_secs(request_timeout_secs));
         #[cfg(feature = "tls")]
         {
             // Both vars must be set to opt-in. A partial config (cert
