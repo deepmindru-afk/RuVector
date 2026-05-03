@@ -47,6 +47,11 @@ struct Inner {
     /// construct time to `seq_len * hidden`. Reused across embed()
     /// calls to avoid the ~196 KB allocation per call.
     last_hidden_buf: Vec<f32>,
+    /// Iter 176 — pooled buffer for the host-side embedding lookup
+    /// output. Same shape as last_hidden_buf, both reused across
+    /// embed() calls. Together iter 175+176 eliminate ~393 KB of
+    /// allocator churn per request.
+    embeds_buf: Vec<f32>,
 }
 
 impl HefEmbedder {
@@ -99,6 +104,7 @@ impl HefEmbedder {
                 embeddings,
                 tokenizer,
                 last_hidden_buf: vec![0.0; max_seq * output_dim],
+                embeds_buf: Vec::with_capacity(max_seq * output_dim),
             }),
             output_dim,
             max_seq,
@@ -152,26 +158,28 @@ impl HefEmbedder {
         }
 
         // 2. Host-side embedding lookup → [seq, hidden] FP32 row-major.
-        let embeds = inner.embeddings.forward(&input_ids)?;
-        if embeds.len() != self.max_seq * self.output_dim {
-            return Err(HailoError::Shape {
-                expected: self.max_seq * self.output_dim,
-                actual: embeds.len(),
-            });
-        }
-
-        // 3. NPU forward pass (UINT8 quant happens inside HailoRT).
-        // Iter 175 — write into the pre-allocated last_hidden_buf to
-        // skip a ~196 KB allocation per call.
-        // We split the borrow into pipeline + last_hidden_buf so the
-        // borrow checker accepts the &mut on both inner.pipeline and
-        // inner.last_hidden_buf simultaneously.
+        // Iter 176 — write into pooled embeds_buf via
+        // HostEmbeddings::forward_into, skipping the per-call
+        // ~196 KB Vec allocation.
+        // 3. NPU forward pass — iter 175 — write into pooled
+        //    last_hidden_buf, skipping another ~196 KB allocation.
+        // We destructure Inner so the borrow checker accepts
+        // simultaneous &mut on the three fields.
         let Inner {
             pipeline,
+            embeddings,
             last_hidden_buf,
+            embeds_buf,
             ..
         } = inner;
-        pipeline.forward_into(&embeds, last_hidden_buf)?;
+        embeddings.forward_into(&input_ids, embeds_buf)?;
+        if embeds_buf.len() != self.max_seq * self.output_dim {
+            return Err(HailoError::Shape {
+                expected: self.max_seq * self.output_dim,
+                actual: embeds_buf.len(),
+            });
+        }
+        pipeline.forward_into(embeds_buf, last_hidden_buf)?;
         let expected_out = self.max_seq * self.output_dim;
         if last_hidden_buf.len() < expected_out {
             return Err(HailoError::Shape {

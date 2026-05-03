@@ -117,12 +117,65 @@ impl HostEmbeddings {
         })
     }
 
-    /// Run `input_ids` (Vec<i64>, length `seq_len`) through the embedding
-    /// lookup. `token_type_ids` defaults to all-zeros for the
-    /// single-segment case. Returns flat FP32 of length
-    /// `seq_len * hidden_size` in row-major `[seq, hidden]` order —
-    /// directly feedable into `HefPipeline::forward`.
+    /// Run `input_ids` through the embedding lookup. Returns flat
+    /// FP32 of length `seq_len * hidden_size` in row-major
+    /// `[seq, hidden]` order — directly feedable into
+    /// `HefPipeline::forward`. Convenience wrapper around
+    /// `forward_into` that allocates each call.
     pub fn forward(&self, input_ids: &[i64]) -> Result<Vec<f32>, HailoError> {
+        let mut out = Vec::with_capacity(input_ids.len() * 1024);
+        self.forward_into(input_ids, &mut out)?;
+        Ok(out)
+    }
+
+    /// Iter 176: write the embedding lookup into a caller-provided
+    /// buffer, skipping the `Tensor::to_vec1` allocation. The buffer
+    /// is `clear()`ed then `extend_from_slice`d from candle's
+    /// `CpuStorage::as_slice` — alloc-free as long as the buffer was
+    /// pre-sized to `seq_len * hidden_size`.
+    pub fn forward_into(
+        &self,
+        input_ids: &[i64],
+        output: &mut Vec<f32>,
+    ) -> Result<(), HailoError> {
+        let normed = self.forward_tensor(input_ids)?;
+        let flat = normed
+            .squeeze(0)
+            .and_then(|t| t.flatten_all())
+            .map_err(|e| HailoError::Tokenizer(format!("flatten: {}", e)))?;
+
+        // Reach into the CPU storage directly so we can extend into
+        // the caller's buffer without a to_vec1 allocation.
+        // The flatten_all output is rank-1 contiguous so the layout's
+        // start_offset is 0 and the slice covers all elements.
+        let (storage, layout) = flat.storage_and_layout();
+        let cpu = match &*storage {
+            candle_core::Storage::Cpu(c) => c,
+            _ => {
+                return Err(HailoError::Tokenizer(
+                    "HostEmbeddings forward landed on non-CPU storage — \
+                     expected Device::Cpu"
+                        .to_string(),
+                ));
+            }
+        };
+        let slice: &[f32] = cpu
+            .as_slice::<f32>()
+            .map_err(|e| HailoError::Tokenizer(format!("storage as_slice: {}", e)))?;
+        let start = layout.start_offset();
+        let len = layout.shape().elem_count();
+        let view = &slice[start..start + len];
+
+        output.clear();
+        output.extend_from_slice(view);
+        Ok(())
+    }
+
+    /// Internal: run the candle ops up to the LayerNorm output Tensor.
+    /// Shared between `forward` and `forward_into`. Returns the
+    /// rank-3 `[1, seq, hidden]` LayerNormed embeddings tensor; the
+    /// caller does its own squeeze/flatten/extract.
+    fn forward_tensor(&self, input_ids: &[i64]) -> Result<Tensor, HailoError> {
         let seq_len = input_ids.len();
         if seq_len == 0 {
             return Err(HailoError::Tokenizer("empty input_ids".to_string()));
@@ -158,15 +211,7 @@ impl HostEmbeddings {
             .forward(&summed)
             .map_err(|e| HailoError::Tokenizer(format!("LayerNorm: {}", e)))?;
 
-        // Squeeze batch dim, flatten to row-major [seq * hidden].
-        let flat = normed
-            .squeeze(0)
-            .and_then(|t| t.flatten_all())
-            .map_err(|e| HailoError::Tokenizer(format!("flatten: {}", e)))?
-            .to_vec1::<f32>()
-            .map_err(|e| HailoError::Tokenizer(format!("to_vec1: {}", e)))?;
-
-        Ok(flat)
+        Ok(normed)
     }
 }
 
