@@ -69,6 +69,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // texts are embedded in order and the binary exits. Repeat the
     // flag to embed multiple texts in one invocation.
     let mut inline_texts: Vec<String> = Vec::new();
+    // Iter 188 — symmetric TLS plumbing (mirror of iter-187 bench
+    // additions). Lets ops drive a single embed against a TLS-enabled
+    // worker without building a custom client. All flags
+    // `#[cfg(feature = "tls")]` so the no-tls build is unchanged.
+    #[cfg(feature = "tls")]
+    let mut tls_ca: Option<String> = None;
+    #[cfg(feature = "tls")]
+    let mut tls_domain: Option<String> = None;
+    #[cfg(feature = "tls")]
+    let mut tls_client_cert: Option<String> = None;
+    #[cfg(feature = "tls")]
+    let mut tls_client_key: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -130,6 +142,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 i += 2;
             }
+            #[cfg(feature = "tls")]
+            "--tls-ca" => { tls_ca = args.get(i + 1).cloned(); i += 2; }
+            #[cfg(feature = "tls")]
+            "--tls-domain" => { tls_domain = args.get(i + 1).cloned(); i += 2; }
+            #[cfg(feature = "tls")]
+            "--tls-client-cert" => { tls_client_cert = args.get(i + 1).cloned(); i += 2; }
+            #[cfg(feature = "tls")]
+            "--tls-client-key" => { tls_client_key = args.get(i + 1).cloned(); i += 2; }
             "--help" | "-h" => { print_help(); return Ok(()); }
             "--version" | "-V" => {
                 println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
@@ -194,6 +214,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Iter 188 — TLS transport when --tls-ca is set; mirrors iter-187
+    // bench plumbing. Same partial-config + orphan-flag refusals so a
+    // misconfigured invocation surfaces an early error instead of a
+    // silent plaintext downgrade.
+    #[cfg(feature = "tls")]
+    let transport: Arc<dyn ruvector_hailo_cluster::transport::EmbeddingTransport + Send + Sync> = {
+        if let Some(ca_path) = tls_ca.as_deref() {
+            let addr0 = workers.first().map(|w| w.address.clone()).unwrap_or_default();
+            let domain = tls_domain.clone().unwrap_or_else(|| {
+                ruvector_hailo_cluster::tls::domain_from_address(&addr0).to_string()
+            });
+            let mut tls = ruvector_hailo_cluster::tls::TlsClient::from_pem_files(ca_path, &domain)
+                .map_err(|e| format!("--tls-ca: {}", e))?;
+            match (tls_client_cert.as_deref(), tls_client_key.as_deref()) {
+                (Some(c), Some(k)) => {
+                    tls = tls.with_client_identity(c, k)
+                        .map_err(|e| format!("--tls-client-cert/--tls-client-key: {}", e))?;
+                    if !quiet {
+                        eprintln!("ruvector-hailo-embed: mTLS client identity attached");
+                    }
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        "--tls-client-cert and --tls-client-key must both be set or both unset".into(),
+                    );
+                }
+                (None, None) => {}
+            }
+            if !quiet {
+                eprintln!(
+                    "ruvector-hailo-embed: TLS enabled ca={} domain={}",
+                    ca_path, domain
+                );
+            }
+            Arc::new(GrpcTransport::with_tls(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(2),
+                tls,
+            )?)
+        } else {
+            if tls_domain.is_some() || tls_client_cert.is_some() || tls_client_key.is_some() {
+                return Err(
+                    "--tls-domain / --tls-client-cert / --tls-client-key require --tls-ca".into(),
+                );
+            }
+            Arc::new(GrpcTransport::new()?)
+        }
+    };
+    #[cfg(not(feature = "tls"))]
     let transport: Arc<dyn ruvector_hailo_cluster::transport::EmbeddingTransport + Send + Sync> =
         Arc::new(GrpcTransport::new()?);
 
@@ -601,6 +670,18 @@ OPTIONS:
                                      text and exit (skips stdin). Repeat
                                      the flag to embed multiple texts
                                      in one invocation.
+    --tls-ca <path>                 Enable HTTPS by trusting the PEM CA
+                                     bundle at <path>. Without this the
+                                     embed CLI dials plaintext gRPC.
+                                     (Requires --features tls.)
+    --tls-domain <name>             SNI / SAN value to assert against the
+                                     server cert. Defaults to the hostname
+                                     half of the first worker address.
+    --tls-client-cert <path>        mTLS client cert (PEM). Pair with
+                                     --tls-client-key.
+    --tls-client-key <path>         mTLS client private key (PEM). Both
+                                     cert and key must be set or both
+                                     unset.
     --help, -h                      Print this help and exit.
     --version, -V                   Print the binary name + version and exit.
 
