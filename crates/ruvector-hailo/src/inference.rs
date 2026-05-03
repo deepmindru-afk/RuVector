@@ -111,11 +111,32 @@ impl EmbeddingPipeline {
 ///
 /// Pure Rust — same on x86 and aarch64. Unit-tested below; feeds into the
 /// NPU output once vstreams come online.
+///
+/// Iter 186: thin wrapper around `mean_pool_into` for callers that want
+/// the convenient owning Vec. Hot paths (HefEmbedder) use the alloc-free
+/// `mean_pool_into` variant directly.
 pub fn mean_pool(token_embeds: &[f32], attention_mask: &[u32], seq_len: usize, dim: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(dim);
+    mean_pool_into(token_embeds, attention_mask, seq_len, dim, &mut out);
+    out
+}
+
+/// Iter 186: alloc-free mean-pool. Same contract as `mean_pool` but
+/// writes into a caller-provided buffer (resized to `dim` and overwritten).
+/// Used by `HefEmbedder` to skip the `~1.5 KB` per-call allocation that
+/// `vec![0.0f32; dim]` would do.
+pub fn mean_pool_into(
+    token_embeds: &[f32],
+    attention_mask: &[u32],
+    seq_len: usize,
+    dim: usize,
+    out: &mut Vec<f32>,
+) {
     debug_assert_eq!(token_embeds.len(), seq_len * dim);
     debug_assert_eq!(attention_mask.len(), seq_len);
 
-    let mut sum = vec![0.0f32; dim];
+    out.clear();
+    out.resize(dim, 0.0);
     let mut count = 0u32;
     for s in 0..seq_len {
         if attention_mask[s] == 0 {
@@ -123,18 +144,23 @@ pub fn mean_pool(token_embeds: &[f32], attention_mask: &[u32], seq_len: usize, d
         }
         count += 1;
         let row = &token_embeds[s * dim..(s + 1) * dim];
-        for d in 0..dim {
-            sum[d] += row[d];
+        // Indexed loop hits the same autovectorized path as the
+        // pre-iter-186 `for d in 0..dim` body. aarch64 NEON / x86 AVX
+        // both lower this to a 4× / 8× wide f32 add via LLVM's loop
+        // vectorizer (verified by inspecting the generated asm in
+        // earlier iters); manual SIMD here would be a maintenance
+        // burden without measurable gain.
+        for (d, &x) in row.iter().enumerate() {
+            out[d] += x;
         }
     }
     if count == 0 {
-        return sum;
+        return;
     }
     let inv = 1.0 / (count as f32);
-    for v in &mut sum {
+    for v in out.iter_mut() {
         *v *= inv;
     }
-    sum
 }
 
 /// L2-normalise a vector in place. After this call, `sum(v_i^2) == 1.0`

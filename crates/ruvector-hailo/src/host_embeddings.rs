@@ -35,6 +35,20 @@ pub struct HostEmbeddings {
     token_type_embeddings: Embedding,
     layer_norm: LayerNorm,
     device: Device,
+    /// Iter 186 — cached `position_ids` lookup output for the fixed
+    /// `max_seq` shape. The HEF is compiled for a single seq len, so
+    /// `position_ids = [0, 1, …, max_seq-1]` is identical every call.
+    /// Stash the *embedded* form (after `position_embeddings.forward`)
+    /// since that's what the per-call sum needs; this skips both the
+    /// `Tensor::new(position_ids)` alloc and the embedding lookup
+    /// per RPC. `None` if max_seq isn't known yet (loaded lazily on
+    /// first forward to avoid plumbing it through `open()`).
+    cached_pos_emb: std::sync::Mutex<Option<(usize, Tensor)>>,
+    /// Iter 186 — cached `token_type_embeddings.forward(zeros)`. Same
+    /// reasoning: the HF tokenizer always emits zeros for single-text
+    /// embeds, and the HEF is compiled for fixed seq, so the result
+    /// is identical every call.
+    cached_type_emb: std::sync::Mutex<Option<(usize, Tensor)>>,
 }
 
 impl HostEmbeddings {
@@ -114,6 +128,8 @@ impl HostEmbeddings {
             token_type_embeddings,
             layer_norm,
             device,
+            cached_pos_emb: std::sync::Mutex::new(None),
+            cached_type_emb: std::sync::Mutex::new(None),
         })
     }
 
@@ -175,6 +191,13 @@ impl HostEmbeddings {
     /// Shared between `forward` and `forward_into`. Returns the
     /// rank-3 `[1, seq, hidden]` LayerNormed embeddings tensor; the
     /// caller does its own squeeze/flatten/extract.
+    ///
+    /// Iter 186 — caches `position_embeddings.forward(0..seq)` and
+    /// `token_type_embeddings.forward(zeros)` keyed on `seq_len` since
+    /// the HEF is compiled for a single fixed seq and both inputs are
+    /// constant per call. First-call latency unchanged; second-call
+    /// onward skips two `Tensor::new` allocs + two embedding lookups
+    /// per RPC.
     fn forward_tensor(&self, input_ids: &[i64]) -> Result<Tensor, HailoError> {
         let seq_len = input_ids.len();
         if seq_len == 0 {
@@ -185,22 +208,15 @@ impl HostEmbeddings {
             .map_err(|e| HailoError::Tokenizer(format!("input tensor: {}", e)))?
             .unsqueeze(0)
             .map_err(|e| HailoError::Tokenizer(format!("unsqueeze: {}", e)))?;
-        let type_t = Tensor::zeros((1, seq_len), DType::I64, &self.device)
-            .map_err(|e| HailoError::Tokenizer(format!("type tensor: {}", e)))?;
-        let position_ids: Vec<i64> = (0..seq_len as i64).collect();
-        let pos_t = Tensor::new(position_ids.as_slice(), &self.device)
-            .map_err(|e| HailoError::Tokenizer(format!("pos tensor: {}", e)))?
-            .unsqueeze(0)
-            .map_err(|e| HailoError::Tokenizer(format!("pos unsqueeze: {}", e)))?;
+
+        // Iter 186 — cached pos + type embeddings. Lock briefly to
+        // populate the slot; the cached Tensor itself is cheap to
+        // clone (candle Tensors are Arc-backed).
+        let pos = self.cached_pos_emb_for(seq_len)?;
+        let typ = self.cached_type_emb_for(seq_len)?;
 
         let word = self.word_embeddings.forward(&input_t).map_err(|e| {
             HailoError::Tokenizer(format!("word_embeddings forward: {}", e))
-        })?;
-        let pos = self.position_embeddings.forward(&pos_t).map_err(|e| {
-            HailoError::Tokenizer(format!("position_embeddings forward: {}", e))
-        })?;
-        let typ = self.token_type_embeddings.forward(&type_t).map_err(|e| {
-            HailoError::Tokenizer(format!("token_type_embeddings forward: {}", e))
         })?;
 
         let summed = (&word + &pos)
@@ -212,6 +228,45 @@ impl HostEmbeddings {
             .map_err(|e| HailoError::Tokenizer(format!("LayerNorm: {}", e)))?;
 
         Ok(normed)
+    }
+
+    /// Iter 186 — fetch (or build on first call) the cached
+    /// `[1, seq_len, hidden]` `position_embeddings` output.
+    fn cached_pos_emb_for(&self, seq_len: usize) -> Result<Tensor, HailoError> {
+        let mut g = self.cached_pos_emb.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((cached_seq, t)) = g.as_ref() {
+            if *cached_seq == seq_len {
+                return Ok(t.clone());
+            }
+        }
+        let position_ids: Vec<i64> = (0..seq_len as i64).collect();
+        let pos_t = Tensor::new(position_ids.as_slice(), &self.device)
+            .map_err(|e| HailoError::Tokenizer(format!("pos tensor: {}", e)))?
+            .unsqueeze(0)
+            .map_err(|e| HailoError::Tokenizer(format!("pos unsqueeze: {}", e)))?;
+        let pos = self.position_embeddings.forward(&pos_t).map_err(|e| {
+            HailoError::Tokenizer(format!("position_embeddings forward: {}", e))
+        })?;
+        *g = Some((seq_len, pos.clone()));
+        Ok(pos)
+    }
+
+    /// Iter 186 — fetch (or build on first call) the cached
+    /// `[1, seq_len, hidden]` `token_type_embeddings(zeros)` output.
+    fn cached_type_emb_for(&self, seq_len: usize) -> Result<Tensor, HailoError> {
+        let mut g = self.cached_type_emb.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((cached_seq, t)) = g.as_ref() {
+            if *cached_seq == seq_len {
+                return Ok(t.clone());
+            }
+        }
+        let type_t = Tensor::zeros((1, seq_len), DType::I64, &self.device)
+            .map_err(|e| HailoError::Tokenizer(format!("type tensor: {}", e)))?;
+        let typ = self.token_type_embeddings.forward(&type_t).map_err(|e| {
+            HailoError::Tokenizer(format!("token_type_embeddings forward: {}", e))
+        })?;
+        *g = Some((seq_len, typ.clone()));
+        Ok(typ)
     }
 }
 
