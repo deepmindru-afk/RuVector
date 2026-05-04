@@ -223,6 +223,78 @@ mod tests {
         assert!(RateLimiter::new(0, 0).is_none());
     }
 
+    // ---- check_n tests (iter 200 API, locked in iter 201) ----
+
+    #[test]
+    fn check_n_zero_is_a_noop() {
+        // n=0 must not consume tokens and must not error — the
+        // embed_stream caller passes n-1 after the interceptor's 1
+        // already debited, so for batch=1 the call is n=0.
+        let r = RateLimiter::new(1, 1).expect("non-zero quota");
+        for _ in 0..10 {
+            assert!(r.check_n("peer-a", 0).is_ok());
+        }
+        // Bucket untouched: a single normal check still passes.
+        assert!(r.check("peer-a").is_ok());
+    }
+
+    #[test]
+    fn check_n_within_burst_consumes_n_tokens() {
+        // 1 rps, burst 5. check_n(3) consumes 3; one more check
+        // succeeds (4th token); two more fail.
+        let r = RateLimiter::new(1, 5).expect("non-zero quota");
+        assert!(r.check_n("peer-a", 3).is_ok());
+        assert!(r.check("peer-a").is_ok(), "4th token should still fit");
+        assert!(r.check("peer-a").is_ok(), "5th token should still fit");
+        assert!(r.check("peer-a").is_err(), "6th must be rate-limited");
+    }
+
+    #[test]
+    fn check_n_exceeding_burst_is_denied() {
+        // 1 rps, burst 4. check_n(8) is bigger than the bucket can
+        // ever hold → governor returns InsufficientCapacity, which
+        // we collapse to RateLimitDenied. The bucket itself is
+        // unchanged (still has all 4 tokens available).
+        let r = RateLimiter::new(1, 4).expect("non-zero quota");
+        assert!(r.check_n("peer-a", 8).is_err());
+        // Verify no tokens were burned by the failed attempt: 4
+        // singletons should still pass.
+        for _ in 0..4 {
+            assert!(r.check("peer-a").is_ok());
+        }
+    }
+
+    #[test]
+    fn check_n_partial_capacity_denied_without_consuming() {
+        // 1 rps, burst 4. Burn 2 with check, then check_n(3) — that's
+        // 2 + 3 = 5 > 4 → denied. The 2 already-burned tokens stay
+        // burned; check_n's denial does NOT roll back.
+        let r = RateLimiter::new(1, 4).expect("non-zero quota");
+        assert!(r.check("peer-a").is_ok());
+        assert!(r.check("peer-a").is_ok());
+        assert!(
+            r.check_n("peer-a", 3).is_err(),
+            "3 tokens beyond the remaining 2 must be denied"
+        );
+        // 2 tokens remaining: 2 singleton checks pass.
+        assert!(r.check("peer-a").is_ok());
+        assert!(r.check("peer-a").is_ok());
+        assert!(r.check("peer-a").is_err());
+    }
+
+    #[test]
+    fn check_n_separate_peers_have_independent_buckets() {
+        // Streaming-batch debits on one peer must not bleed into
+        // another peer's quota.
+        let r = RateLimiter::new(1, 4).expect("non-zero quota");
+        assert!(r.check_n("peer-a", 4).is_ok());
+        assert!(r.check("peer-a").is_err(), "peer-a fully consumed");
+        // peer-b's bucket is untouched.
+        assert!(r.check_n("peer-b", 4).is_ok());
+        assert!(r.check("peer-b").is_err());
+        assert_eq!(r.tracked_peers(), 2);
+    }
+
     // Iter 197 — both tests below mutate the same process-global env
     // vars (`RUVECTOR_RATE_LIMIT_RPS` / `_BURST`). Cargo runs tests in
     // parallel by default, so without serialization the wipe in
