@@ -1,11 +1,32 @@
 //! `ruview-csi-bridge` — host-side daemon that receives RuView's ADR-018
-//! binary CSI UDP frames and posts decoded summaries to the
-//! hailo-backend cluster's embed RPC.
+//! binary CSI UDP frames and posts a **header-summary natural-language
+//! string** to the hailo-backend cluster's embed RPC. Telemetry
+//! indexing only — the I/Q payload (`bytes 20..`) is parsed for the
+//! header but otherwise dropped.
 //!
-//! Iter 123 (ADR-171 implementation, companion to iter-115's
+//! # Important: this bridge is *not* WiFi-DensePose pose embedding
+//!
+//! ADR-178 §3.2 C (iter 220) explicitly disambiguated this: the
+//! cosine embeddings of the summary strings cluster by
+//! `(channel, rssi-bucket, node_id)`, NOT by anything related to
+//! actual WiFi-DensePose pose content. ADR-171's pipeline diagram
+//! (`CSI tensor → preprocess → HEF → pose tensor`) implies pose
+//! semantics; this bridge ships none of that — it bridges the
+//! *transport* (UDP→gRPC) and uses the same text-encoder HEF that
+//! serves regular sentence inputs.
+//!
+//! Real pose embedding requires a pose-specific HEF (Hailo Model Zoo
+//! today ships only hailo15h/10h variants, ADR-167 line 184-194), a
+//! `HailoPipeline<I, O>` generalization of `EmbeddingPipeline`, and
+//! host-side I/Q preprocessing (magnitude / FFT). That work is
+//! tracked as a separate ADR per ADR-178 §3.2 C's long-term
+//! recommendation; **this bridge stays as it is, useful for telemetry
+//! indexing**.
+//!
+//! Iter 123 (ADR-171 transport implementation, companion to iter-115's
 //! mmwave-bridge). RuView's ESP32 CSI nodes broadcast
 //! `0xC5110001` (raw I/Q) or `0xC5110006` (feature state) UDP packets
-//! on a configurable port; this bin parses them, derives a short
+//! on a configurable port; this bin parses the header, derives a short
 //! natural-language description (RSSI / channel / motion-flag), and
 //! posts each description into the cluster via the same TLS/mTLS-
 //! protected embed path the mmwave-bridge uses.
@@ -88,10 +109,19 @@ fn parse_csi_header(data: &[u8]) -> Option<CsiSummary> {
 }
 
 /// Convert a CSI summary into an embedding-friendly NL string.
-/// Short, sentence-like, includes the values that drive presence /
-/// motion / pose downstream consumers care about. Keeps the format
-/// parallel to mmwave-bridge's `event_to_text` so cluster-side
-/// pattern matching can treat both bridges uniformly.
+/// Short, sentence-like, includes the header values that drive
+/// telemetry indexing. Keeps the format parallel to mmwave-bridge's
+/// `event_to_text` so cluster-side pattern matching can treat both
+/// bridges uniformly.
+///
+/// **Note (iter 220, ADR-178 §3.2 C):** the I/Q payload at
+/// `bytes 20..` is intentionally *not* part of this string. The
+/// cosine embedding of the resulting NL clusters by
+/// `(channel, rssi, node_id)`, useful for "all CSI from node 3 on
+/// channel 6" queries — but it does NOT carry pose semantics. Real
+/// WiFi-DensePose pose embedding requires a pose HEF + I/Q
+/// preprocessing and is out of scope for this transport bridge;
+/// see the module docstring for the deferral context.
 fn summary_to_text(s: &CsiSummary) -> String {
     let kind = if s.magic == CSI_MAGIC_V6 { "feature-state" } else { "raw" };
     format!(
