@@ -146,6 +146,32 @@ impl FileDiscovery {
 
 impl Discovery for FileDiscovery {
     fn discover(&self) -> Result<Vec<WorkerEndpoint>, ClusterError> {
+        // Iter 210 — refuse manifests larger than 1 MB before we
+        // `read_to_string`. A legitimate fleet manifest is one
+        // `name=host:port` per worker (~100 B per line); even a 1000-
+        // worker tailnet fits in ~100 KB. The 1 MB cap is 10× legit
+        // headroom and prevents an accidentally-corrupted or
+        // attacker-pointed-at file from OOMing the worker at boot.
+        // We hit this BEFORE the iter-107 signature check so a
+        // pathologically large file fails fast — verification of a
+        // 1 GB signed file would be slow even though it'd reject.
+        const MAX_MANIFEST_BYTES: u64 = 1 << 20; // 1 MB
+        let meta = std::fs::metadata(&self.path).map_err(|e| ClusterError::Transport {
+            worker: "<discovery>".into(),
+            reason: format!("FileDiscovery: stat {}: {}", self.path.display(), e),
+        })?;
+        if meta.len() > MAX_MANIFEST_BYTES {
+            return Err(ClusterError::Transport {
+                worker: "<discovery>".into(),
+                reason: format!(
+                    "FileDiscovery: manifest {} is {} bytes, exceeds {} byte cap \
+                     (iter 210 — likely a misconfig; legitimate fleets fit in <100 KB)",
+                    self.path.display(),
+                    meta.len(),
+                    MAX_MANIFEST_BYTES
+                ),
+            });
+        }
         // ADR-172 §1c iter-107: when a signature is configured, verify
         // *before* parsing. We don't even tokenize the manifest until
         // we know the bytes match the operator's signing key — defends
@@ -423,5 +449,56 @@ mod tests {
                 eprintln!("(tailscale not available: {})", e);
             }
         }
+    }
+
+    /// Iter 210 — the 1 MB manifest cap. A 2 MB file should be rejected
+    /// by `stat`-then-cap before reaching read_to_string.
+    #[test]
+    fn file_discovery_rejects_oversized_manifest() {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join("iter210-oversized-manifest.txt");
+        // 2 MB of "a = 1.2.3.4:50051\n"-style filler. Way under any
+        // legit fleet shape; the cap is the gate, not the contents.
+        let line = "filler-name = 1.2.3.4:50051\n";
+        let n_lines = (2 * 1024 * 1024) / line.len() + 1;
+        let mut f = std::fs::File::create(&path).expect("create fixture");
+        for _ in 0..n_lines {
+            f.write_all(line.as_bytes()).expect("write fixture");
+        }
+        f.sync_all().expect("sync");
+        drop(f);
+
+        let d = FileDiscovery::new(&path);
+        let err = d.discover().expect_err("oversized manifest must be rejected");
+        match err {
+            ClusterError::Transport { reason, .. } => {
+                assert!(
+                    reason.contains("exceeds")
+                        && reason.contains("byte cap")
+                        && reason.contains("iter 210"),
+                    "expected size-cap rejection text, got: {:?}",
+                    reason
+                );
+            }
+            other => panic!("expected ClusterError::Transport, got {:?}", other),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Counterpart: a small (well-under-cap) manifest still works.
+    #[test]
+    fn file_discovery_accepts_small_manifest() {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join("iter210-small-manifest.txt");
+        let mut f = std::fs::File::create(&path).expect("create fixture");
+        f.write_all(b"pi-a = 100.77.59.83:50051\npi-b = 100.77.59.84:50051\n")
+            .expect("write fixture");
+        f.sync_all().expect("sync");
+        drop(f);
+
+        let d = FileDiscovery::new(&path);
+        let workers = d.discover().expect("small manifest should parse");
+        assert_eq!(workers.len(), 2);
+        let _ = std::fs::remove_file(&path);
     }
 }
