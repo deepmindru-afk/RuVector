@@ -44,9 +44,36 @@ pub struct GrpcTransport {
 }
 
 impl GrpcTransport {
-    /// Construct with default timeouts (5 s connect, 2 s per RPC).
+    /// Construct with default timeouts. Reads two env-var overrides
+    /// for ops who want to tune without rebuilding clients:
+    ///   RUVECTOR_CLIENT_CONNECT_TIMEOUT_MS — default 5000, floor 100
+    ///   RUVECTOR_CLIENT_RPC_TIMEOUT_MS     — default 10000, floor 100
+    ///
+    /// Iter 208 — the previous default (2 s per RPC) was set when the
+    /// worker only handled unary embeds at ~14 ms each. iter-199 raised
+    /// the worker's `max_batch_size` to 256, which means a single
+    /// streaming RPC can legitimately need `256 × 14 ms ≈ 3.6 s` of NPU
+    /// time. The 2 s client cap turned every b≥128 batch into a guaranteed
+    /// `Status::deadline_exceeded`, even though the worker would have
+    /// completed the work cleanly. 10 s default gives 2.7× headroom over
+    /// the worst legit batch and is well below the worker's iter-182
+    /// `request_timeout=30 s` outer bound — so a real hang still surfaces
+    /// to the client within the worker's own timeout window.
     pub fn new() -> Result<Self, ClusterError> {
-        Self::with_timeouts(Duration::from_secs(5), Duration::from_secs(2))
+        let connect_ms: u64 = std::env::var("RUVECTOR_CLIENT_CONNECT_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5_000)
+            .max(100);
+        let rpc_ms: u64 = std::env::var("RUVECTOR_CLIENT_RPC_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10_000)
+            .max(100);
+        Self::with_timeouts(
+            Duration::from_millis(connect_ms),
+            Duration::from_millis(rpc_ms),
+        )
     }
 
     /// Construct with explicit connect / per-RPC timeouts. `new()` uses
