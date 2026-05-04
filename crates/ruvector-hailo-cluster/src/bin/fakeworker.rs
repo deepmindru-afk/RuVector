@@ -35,6 +35,13 @@ struct FakeWorker {
     dim: usize,
     latency: Duration,
     fingerprint: String,
+    /// Iter 203 — backport of iter-199's batch-size cap for parity
+    /// with the real worker. Without this, fakeworker silently
+    /// processes batches of any size while the real worker rejects
+    /// them — hiding regressions from any integration test that uses
+    /// fakeworker as a stand-in. Same env (RUVECTOR_MAX_BATCH_SIZE)
+    /// + same default (256) so deploys stay consistent.
+    max_batch_size: usize,
 }
 
 #[tonic::async_trait]
@@ -97,10 +104,27 @@ impl Embedding for FakeWorker {
             &request.get_ref().request_id,
         );
         let req = request.into_inner();
+        let n = req.texts.len();
         let req_id_field: &str = if req_id_owned.is_empty() { "-" } else { &req_id_owned };
         tracing::Span::current()
-            .record("batch_size", req.texts.len())
+            .record("batch_size", n)
             .record("request_id", req_id_field);
+        // Iter 203 — same iter-199 batch-size cap as the real worker.
+        // Without this, fakeworker accepted unbounded batches while
+        // the real worker rejected them — hiding parity regressions
+        // from integration tests that use fakeworker as a stand-in.
+        if n > self.max_batch_size {
+            tracing::warn!(
+                batch_size = n,
+                max_batch_size = self.max_batch_size,
+                "fakeworker embed_stream batch too large — rejecting"
+            );
+            return Err(Status::invalid_argument(format!(
+                "batch size {} exceeds max {} (ADR-172 §3a iter 199; \
+                 tune via RUVECTOR_MAX_BATCH_SIZE)",
+                n, self.max_batch_size
+            )));
+        }
         // Top-level info on entry — single embed has one too, so both
         // RPCs leave a visible audit trail with the same fields. The
         // span's `request_id` field is the cross-system correlation key.
@@ -189,11 +213,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ruvector-hailo-fakeworker starting"
     );
 
+    // Iter 203 — read RUVECTOR_MAX_BATCH_SIZE so fakeworker honors the
+    // same cap as the real worker (iter 199). Defaulting to 256 with a
+    // floor of 1 mirrors the worker behavior exactly.
+    let max_batch_size: usize = std::env::var("RUVECTOR_MAX_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(256)
+        .max(1);
+
     let svc = FakeWorker {
         name,
         dim,
         latency: Duration::from_millis(latency_ms),
         fingerprint,
+        max_batch_size,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -253,7 +287,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             request_timeout_secs,
             max_pending_resets,
             http2_keepalive_secs = keepalive_secs,
-            "fakeworker DoS-gate parity (iter 192)"
+            max_batch_size = svc.max_batch_size,
+            "fakeworker DoS-gate parity (iter 192/203)"
         );
         let mut server = Server::builder()
             .max_concurrent_streams(Some(max_streams))
