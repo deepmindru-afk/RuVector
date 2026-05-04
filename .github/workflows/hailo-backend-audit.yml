@@ -58,13 +58,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
-      - name: Run cargo deny check
+      - name: Run cargo deny check (cluster)
         working-directory: crates/ruvector-hailo-cluster
         # Reads deny.toml at the crate root (committed iter 92).
         # Targets x86_64 + aarch64 deploys; allowlist of MIT/Apache/BSD/
         # ISC licenses; denies wildcards + unknown registries + unknown
         # git sources. Iter 98: now wired into CI.
         run: cargo deny --log-level error check
+      - name: Run cargo deny check (hailo)
+        working-directory: crates/ruvector-hailo
+        # Iter 202 — closes the iter-177 coverage gap. Both hailo +
+        # cluster crates ship a deny.toml, but CI only audited the
+        # cluster's. Now both feed the same gate so a future change
+        # that adds a denied license to the hailo dep tree (candle /
+        # tokenizers / safetensors chain via cpu-fallback, or
+        # hailort-sys via hailo) fails fast.
+        run: cargo deny --log-level error --all-features check
 
   clippy:
     name: clippy --all-targets -D warnings (cluster)
@@ -122,6 +131,22 @@ jobs:
       - name: Clippy shared mmwave parser crate
         working-directory: crates/ruvector-mmwave
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # Iter 202 — explicitly run ruvector-hailo lib tests so the
+      # iter-198 hef_verify cases (magic-byte + sha256-pin coverage)
+      # are gated in CI. The cluster crate's `cargo test` only runs
+      # cluster-owned tests; dependency lib tests aren't transitively
+      # covered. Default build (no `hailo` feature → no libhailort
+      # required) is enough to exercise hef_verify; the cpu-fallback
+      # feature path picks up host_embeddings + tokenizer tests.
+      - name: Test hailo crate (default features)
+        working-directory: crates/ruvector-hailo
+        run: cargo test
+      - name: Test hailo crate (--features cpu-fallback)
+        working-directory: crates/ruvector-hailo
+        run: cargo test --features cpu-fallback
+      - name: Clippy hailo crate
+        working-directory: crates/ruvector-hailo
+        run: cargo clippy --all-targets -- -D warnings
 
   aarch64-cross-build:
     # Iter 122/128: cross-compile every sensor bridge for the Pi 5

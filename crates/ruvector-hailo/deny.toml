@@ -53,6 +53,12 @@ confidence-threshold = 0.93
 # stack pulls some duplicates we can't easily resolve.
 multiple-versions = "warn"
 wildcards = "deny"
+# Iter 202 — same rationale as the cluster's deny.toml: the
+# ruvector-hailo crate has a path dep on hailort-sys (in-tree FFI
+# wrapper), which cargo-deny treats as a wildcard. Allow path-based
+# wildcards explicitly so the bans check still gates real
+# version="*" wildcard deps.
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 

@@ -7,6 +7,11 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ruvnet/ruvector"
 keywords = ["ruvector", "hailo", "npu", "embedding", "edge-ai"]
 categories = ["embedded", "science"]
+# Iter 202 — internal-only crate. Path dep on hailort-sys (in-tree
+# FFI binding) means it can't be published to crates.io anyway, and
+# leaving publish unset (= true) makes `cargo deny`'s allow-wildcard-
+# paths refuse to honor the in-workspace wildcard exception.
+publish = false
 
 # `hailo` feature gates the actual NPU runtime path. Building without the
 # feature compiles a stub that errors at runtime — useful for `cargo check`

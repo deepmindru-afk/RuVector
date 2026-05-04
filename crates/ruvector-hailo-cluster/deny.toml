@@ -49,6 +49,14 @@ confidence-threshold = 0.93
 # Explicit bans for things we don't want creeping in.
 multiple-versions = "warn"
 wildcards = "deny"
+# Iter 202 — explicit allow for in-workspace path deps (which
+# cargo-deny otherwise treats as wildcards). Without this the bans
+# check fails on `path = "../foo"` references like the iter-115
+# ruvector-mmwave parser crate or the iter-167 hailort-sys binding.
+# Path deps are version-locked-by-construction (they resolve to
+# whatever's in the same checkout), so the wildcard-version risk
+# this rule normally guards against doesn't apply.
+allow-wildcard-paths = true
 highlight = "all"
 
 # Deny known-unsound or notoriously slow crates if they appear via
