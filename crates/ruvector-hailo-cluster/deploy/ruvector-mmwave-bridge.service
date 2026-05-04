@@ -7,6 +7,12 @@ Documentation=https://github.com/ruvnet/ruvector
 # run, so use Wants= (soft) rather than Requires= (hard).
 Wants=network-online.target tailscaled.service
 After=network-online.target tailscaled.service
+# Iter 205 — bound the restart-on-failure loop. Mirrors the worker's
+# StartLimitBurst hardening: parks the unit in `failed` state after
+# 5 failed starts in 60 s instead of cycling forever (e.g., a missing
+# UART device, malformed worker manifest).
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple

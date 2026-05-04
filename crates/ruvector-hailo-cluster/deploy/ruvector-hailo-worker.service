@@ -6,6 +6,16 @@ Documentation=https://github.com/ruvnet/ruvector
 # tailnet for ACL-gated access).
 Wants=network-online.target tailscaled.service
 After=network-online.target tailscaled.service
+# Iter 205 — bound the restart-on-failure loop. Without these, a worker
+# that fails at startup (e.g., RUVECTOR_HEF_SHA256 mismatch from iter
+# 174, missing model.hef, vstream alloc fail) restarts every 2 s
+# indefinitely, churning the log + the NPU. With this, after 5 failed
+# starts inside a 60 s window systemd parks the unit in `failed` state
+# so the operator sees the issue instead of a perpetually-restarting
+# loop. Iter-185's clean shutdown path (process::exit(0)) is treated
+# as success and doesn't count toward the burst.
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
