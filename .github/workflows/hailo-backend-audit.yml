@@ -97,7 +97,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/ruvector-hailo-cluster/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/ruvector-hailo-cluster/Cargo.lock') }}
+          # Iter 227 — cache key now points at the workspace-root
+          # Cargo.lock since iter-219 removed the per-crate
+          # `crates/ruvector-hailo-cluster/Cargo.lock`. Keeping the
+          # stale reference would have resolved to an empty hash via
+          # `hashFiles()` of a missing path, collapsing every branch's
+          # cache to the same key → false hits on unrelated trees.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Run clippy
         working-directory: crates/ruvector-hailo-cluster
         run: cargo clippy --all-targets -- -D warnings
@@ -116,7 +122,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/ruvector-hailo-cluster/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('crates/ruvector-hailo-cluster/Cargo.lock') }}
+          # Iter 227 — workspace-root Cargo.lock (see clippy job).
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
       - name: Run all suites
         working-directory: crates/ruvector-hailo-cluster
         run: cargo test
