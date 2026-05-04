@@ -835,6 +835,19 @@ impl HailoClusterEmbedder {
                     return Ok(vec);
                 }
                 Err(e) => {
+                    // Iter 209 — short-circuit on deterministic errors
+                    // that won't change on retry (iter-180 OutOfRange,
+                    // iter-199 InvalidArgument, iter-104/200
+                    // ResourceExhausted, plus dim/fingerprint
+                    // mismatches). Without this, every byte-cap or
+                    // batch-cap rejection burns the full 3-attempt
+                    // retry budget — and for rate limiting it actively
+                    // makes things worse: each retry consumes another
+                    // token from the same peer's bucket, deepening
+                    // the rate-limit hole the caller is already in.
+                    if e.is_terminal() {
+                        return Err(e);
+                    }
                     self.pool
                         .record_health_failure(&endpoint.name, HEALTH_FAIL_THRESHOLD);
                     last_err = Some(e);
