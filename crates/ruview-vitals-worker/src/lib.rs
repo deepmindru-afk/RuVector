@@ -39,6 +39,7 @@ pub mod error;
 pub mod frame;
 pub mod grpc;
 pub mod heartrate;
+pub mod mcp_brain;
 pub mod pipeline;
 pub mod preprocessor;
 pub mod state;
