@@ -78,6 +78,8 @@ members = [
     "crates/ruview-cluster-sdk",
     # ADR-184: ruvllm LLM serving on cognitum-cluster-3 Hailo-10H (AI HAT+ 2).
     "crates/ruview-ruvllm-h10",
+    # ADR-185: multi-backend LLM router — load-balances across all H10H nodes.
+    "crates/ruview-ruvllm-router",
     "examples/refrag-pipeline",
     "examples/scipix",
     "examples/google-cloud",
