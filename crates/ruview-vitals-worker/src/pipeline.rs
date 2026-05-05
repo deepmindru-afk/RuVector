@@ -121,8 +121,18 @@ impl VitalsPipeline {
         self.window.push(&residuals, ts_us, frame.header.node_id);
         let weights = self.window.variance_weights();
 
-        let breathing = self.breathing.extract(&residuals, &weights)?;
-        let heart_rate = self.heart_rate.extract(&residuals, &csi.phases)?;
+        // Evaluate **both** extractors unconditionally so neither
+        // misses out on the other's warmup period. Using the `?`
+        // short-circuit here would have meant `heart_rate.extract` was
+        // never called during the breathing extractor's warmup (frames
+        // 1..720 at default settings), and the heart-rate history
+        // would stay empty long past the configured window.
+        let breathing = self.breathing.extract(&residuals, &weights);
+        let heart_rate = self.heart_rate.extract(&residuals, &csi.phases);
+        let (breathing, heart_rate) = match (breathing, heart_rate) {
+            (Some(b), Some(hr)) => (b, hr),
+            _ => return None,
+        };
 
         let snr_db = estimate_snr_db(frame.header.rssi, frame.header.noise_floor);
 

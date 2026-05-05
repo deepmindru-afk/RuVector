@@ -53,6 +53,13 @@ tokio = { version = "1", features = ["full", "test-util"] }
 name = "ruview-vitals-worker"
 path = "src/bin/ruview-vitals-worker.rs"
 
+[[bin]]
+# `ruview-vitals-replay` — synthetic + recorded ADR-018 UDP broadcaster.
+# Used to validate the worker stack end-to-end without the attached
+# ESP32 hardware. Not deployed to the cluster Pis.
+name = "ruview-vitals-replay"
+path = "src/bin/ruview-vitals-replay.rs"
+
 [lints.rust]
 # `deny` (not `forbid`) so `build.rs` can opt in for the one
 # `env::set_var(PROTOC, …)` line. Library + bin code stays
