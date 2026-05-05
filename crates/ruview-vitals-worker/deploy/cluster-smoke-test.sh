@@ -70,7 +70,7 @@ check_sona_steps() {
   local host="$1" label="$2" min_steps="$3"
   local steps
   steps=$(ssh -o ConnectTimeout=8 -o BatchMode=yes "$host" \
-    "journalctl -u ruview-vitals-worker --no-pager -n 50 -o cat 2>&1 | grep 'sona: gradient step' | tail -1 | grep -oP 'steps=\K[0-9]+'" 2>&1 || echo 0)
+    "journalctl -u ruview-vitals-worker --no-pager -n 500 -o cat 2>&1 | grep 'sona: gradient step' | tail -1 | grep -oP 'steps=\K[0-9]+'" 2>&1 || echo 0)
   steps="${steps//[^0-9]/}"
   steps="${steps:-0}"
   if [[ "$steps" -ge "$min_steps" ]]; then
