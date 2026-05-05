@@ -116,6 +116,12 @@ const fn status_label(s: VitalStatus) -> &'static str {
 /// [`crate::state::WorkerStats::brain_posts_failed`] and surfaced via
 /// `GetStats`.
 pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interval: Duration) {
+    tracing::info!(
+        url = client.base_url(),
+        node = client.node_name(),
+        interval_secs = interval.as_secs(),
+        "brain loop starting"
+    );
     let mut tick = tokio::time::interval(interval);
     // Skip the immediate first tick — let the pipeline collect at
     // least one full window before we POST.
@@ -124,6 +130,10 @@ pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interv
     loop {
         tick.tick().await;
         let readings = state.latest_snapshot().await;
+        tracing::debug!(
+            count = readings.len(),
+            "brain tick: snapshotting latest readings"
+        );
         if readings.is_empty() {
             continue;
         }
@@ -132,8 +142,10 @@ pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interv
             match client.post_memory("spatial-vitals", &summary).await {
                 Ok(()) => {
                     state.stats.brain_posts_ok.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(
+                    tracing::info!(
                         node_id = reading.node_id,
+                        breathing_bpm = reading.breathing.value_bpm,
+                        heart_rate_bpm = reading.heart_rate.value_bpm,
                         "POST /memories ok"
                     );
                 }
