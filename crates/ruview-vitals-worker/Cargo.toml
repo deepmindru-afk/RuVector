@@ -35,6 +35,11 @@ serde_json         = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# axum + sha2 used by the optional `ruview-mcp-brain-mini` bin
+# (ADR-183 Tier 2 iter 8). Cheap to pull — both are already transitive
+# deps via tonic + reqwest.
+axum               = { version = "0.7", default-features = false, features = ["json", "http1", "tokio", "query"] }
+sha2               = "0.10"
 
 # Path-dep behind --features ruview-integration. See ADR-183.
 [dependencies.wifi-densepose-vitals]
@@ -59,6 +64,16 @@ path = "src/bin/ruview-vitals-worker.rs"
 # ESP32 hardware. Not deployed to the cluster Pis.
 name = "ruview-vitals-replay"
 path = "src/bin/ruview-vitals-replay.rs"
+
+[[bin]]
+# `ruview-mcp-brain-mini` — minimal axum + JSONL-append brain that
+# accepts {category, content} POSTs to /memories and serves them on
+# GET. ADR-183 Tier 2 iter 8: lets cognitum-v0 host its own brain so
+# workers stop POSTing to the ruvultra LAN proxy. Wire-compatible
+# with the existing mcp-brain-serve REST shape so RuView's
+# brain_bridge.rs and our BrainClient both work unchanged.
+name = "ruview-mcp-brain-mini"
+path = "src/bin/ruview-mcp-brain-mini.rs"
 
 [lints.rust]
 # `deny` (not `forbid`) so `build.rs` can opt in for the one
