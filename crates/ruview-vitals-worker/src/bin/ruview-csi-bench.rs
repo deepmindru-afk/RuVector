@@ -311,6 +311,46 @@ fn main() {
             "ADR-183 §17 target (≥ 2×): {}",
             if target_met { "PASS ✓" } else { "FAIL ✗" }
         );
+        println!();
+
+        // ── Latency benchmark (ADR-183 §7 target: p99 < 12 ms) ───────────────
+        {
+            const WARMUP: usize = 100;
+            const ITERS: usize = 10_000;
+            let probe_features = activity_to_features(&ACTIVITIES[0], 0, 0.0);
+
+            // Warm up JIT / branch predictors.
+            for _ in 0..WARMUP {
+                let _ = embedder.embed(&probe_features);
+            }
+
+            let mut latencies_us: Vec<u64> = Vec::with_capacity(ITERS);
+            for _ in 0..ITERS {
+                let t0 = std::time::Instant::now();
+                let _ = embedder.embed(&probe_features);
+                latencies_us.push(t0.elapsed().as_micros() as u64);
+            }
+            latencies_us.sort_unstable();
+
+            let p50 = latencies_us[ITERS / 2];
+            let p99 = latencies_us[ITERS * 99 / 100];
+            let p99_9 = latencies_us[ITERS * 999 / 1000];
+            let mean = latencies_us.iter().sum::<u64>() / ITERS as u64;
+
+            println!("Forward-pass latency (CPU, {ITERS} iters, release build):");
+            println!("  mean:  {mean} µs");
+            println!("  p50:   {p50} µs");
+            println!("  p99:   {p99} µs  ({:.3} ms)", p99 as f64 / 1000.0);
+            println!("  p99.9: {p99_9} µs");
+            let latency_ok = p99 < 12_000;
+            println!(
+                "ADR-183 §7 target (p99 < 12 ms): {}",
+                if latency_ok { "PASS ✓" } else { "FAIL ✗" }
+            );
+            if !latency_ok {
+                std::process::exit(1);
+            }
+        }
 
         if !target_met {
             if embedder.has_lora() {

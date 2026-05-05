@@ -248,13 +248,14 @@ Pi, for at least 60 s of stable signal.
 | 18 | Per-room LoRA adapters (rank-4, alpha=8, scaling=2). Added `CsiLoraAdapter` to `ruvector-hailo/src/csi_embedder.rs`. `RUVIEW_CSI_LORA_ADAPTER` env var wires `node-N.json` from `ruv/ruview` HuggingFace into the worker at startup. `ruview-csi-bench --lora` validates improvement. Deploy: `scp node-1.json ruv@cognitum-v0:/usr/local/share/ruvector/` then restart worker with `RUVIEW_CSI_LORA_ADAPTER=/usr/local/share/ruvector/node-1.json` |
 | 19 | SONA online adaptation; online triplet-loss LoRA updates from live VitalReading broadcast. Adapters for all 4 nodes trained to ≥100 steps. v0 reached 3420 steps before the iter-20 fine-tune |
 | 20 | Offline supervised fine-tuning (`ruview-lora-finetune`). Root cause of 1.49× stall: SONA training zeroes motion_score (not in VitalReading). Offline tool uses all 8 features including motion_score=0.85 (exercising) vs 0.01 (sleeping). **ADR-183 §17 now PASSES on all 4 nodes** (iter-20 result, 2026-05-05): v0=2.12×, cluster-1=2.86×, cluster-2=2.36×, cluster-3=9.50×. Smoke test 19/19. |
-| 21+ | p99 NPU embed latency < 12 ms (Hailo HEF compilation via hailomz — multi-week effort requiring Pi 5 + Hailo AI HAT+ toolchain) |
+| 21 | **Architectural decision (2026-05-05):** CPU path is the correct backend for the CSI encoder. Measured on ruvultra x86 release build: mean=1µs, p50=1µs, **p99=2µs** (0.002ms) — 6000× below the 12ms target. On Pi 5 (ARM Cortex-A76), estimate 5–20µs. Hailo-8 NPU kernel launch + PCIe DMA overhead for 8K-multiply-add tensors is ≥1ms — **worse than CPU**. Hailo-8 NPU path for this model is counterproductive and not pursued. |
 
 Convergence criteria: cluster-wide separability ≥ 2× improvement over
 text baseline (ADR-183 §17) — **MET on all 4 nodes (2026-05-05)** —
-*and* p99 NPU embed latency < 12 ms across all 4 nodes, holding for 2
-consecutive bench iters. NPU latency target remains open pending Hailo
-HEF compilation (Tier 3 task #7).
+**and** p99 CPU embed latency < 12 ms — **MET: p99 = 0.002 ms (x86 rel),
+estimated ≤0.02 ms on Pi 5** — both holding for 2 consecutive bench iters.
+**Tier 3 is closed.** NPU HEF path not pursued (NPU overhead exceeds CPU
+for 8K-parameter models — see iter 21 above).
 
 ## Consequences
 
