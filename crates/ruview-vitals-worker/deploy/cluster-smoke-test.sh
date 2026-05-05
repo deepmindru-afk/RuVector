@@ -177,6 +177,33 @@ check_service "root@100.73.75.53" "ruview-ruvllm-h10"
 check_ruvllm_h10 "root@100.73.75.53" "cognitum-cluster-3" "8880" "50058"
 
 echo ""
+echo "-- ADR-185 Hailo-10H LLM service (cognitum-v0) --"
+check_service "$V0_HOST" "ruview-ruvllm-h10"
+check_ruvllm_h10 "$V0_HOST" "cognitum-v0" "8880" "50058"
+
+echo ""
+echo "-- ADR-185 LLM router (cognitum-v0) --"
+check_service "$V0_HOST" "ruview-ruvllm-router"
+# Router HTTP /health — expects JSON with backends_healthy > 0
+router_health=$(ssh -o ConnectTimeout=8 -o BatchMode=yes "$V0_HOST" \
+  "curl -sf http://127.0.0.1:8882/health 2>/dev/null" 2>/dev/null || echo '{}')
+router_healthy=$(echo "$router_health" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('backends_healthy',0))" 2>/dev/null || echo 0)
+router_total=$(echo "$router_health" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('backends_total',0))" 2>/dev/null || echo 0)
+if [[ "${router_healthy:-0}" -ge 1 ]]; then
+  pass "router: ${router_healthy}/${router_total} backends healthy on v0"
+else
+  fail "router: 0 healthy backends on v0 (got $router_health)"
+fi
+# Router gRPC port reachable from ruvultra
+router_ts_ip="100.77.59.83"
+router_open=$(timeout 3 bash -c "echo > /dev/tcp/${router_ts_ip}/50060" 2>&1 && echo open || echo closed)
+if [[ "$router_open" == "open" ]]; then
+  pass "router gRPC :50060 reachable from ruvultra via Tailscale"
+else
+  fail "router gRPC :50060 not reachable from ruvultra"
+fi
+
+echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="
 
 if [[ $FAIL -gt 0 ]]; then
