@@ -101,6 +101,15 @@ path = "src/bin/ruview-csi-bench.rs"
 name = "ruview-lora-init"
 path = "src/bin/ruview-lora-init.rs"
 
+[[bin]]
+# `ruview-lora-finetune` — ADR-183 Tier 3 iter 20. Offline supervised LoRA
+# fine-tuning on the 5 synthetic activity class archetypes with all 8 CSI
+# features (including motion_score which SONA zeroes out). Optimises the
+# adapter until separability improvement ≥ 2× over text baseline (ADR-183 §17).
+# Requires --features csi-embed.
+name = "ruview-lora-finetune"
+path = "src/bin/ruview-lora-finetune.rs"
+
 [lints.rust]
 # `deny` (not `forbid`) so `build.rs` can opt in for the one
 # `env::set_var(PROTOC, …)` line. Library + bin code stays
