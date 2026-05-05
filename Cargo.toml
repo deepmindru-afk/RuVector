@@ -74,6 +74,8 @@ members = [
     # service, and brain POST shim. Path-dep on RuView is opt-in via
     # `--features ruview-integration` (default off).
     "crates/ruview-vitals-worker",
+    # ADR-183: gRPC client SDK for cluster-wide vitals aggregation (Tier 1/2 fusion).
+    "crates/ruview-cluster-sdk",
     "examples/refrag-pipeline",
     "examples/scipix",
     "examples/google-cloud",

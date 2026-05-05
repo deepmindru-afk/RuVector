@@ -8767,6 +8767,7 @@ dependencies = [
  "predicates",
  "prettytable-rs",
  "rand 0.8.5",
+ "reqwest 0.12.28",
  "ruvector-core 2.2.1",
  "ruvector-gnn",
  "ruvector-graph",
@@ -10418,16 +10419,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruview-cluster-sdk"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "prost",
+ "protoc-bin-vendored",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tracing",
+]
+
+[[package]]
 name = "ruview-vitals-worker"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "axum 0.7.9",
  "futures-core",
  "prost",
  "protoc-bin-vendored",
  "reqwest 0.12.28",
+ "ruvector-hailo",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
