@@ -131,6 +131,8 @@ mod tests {
             node_name: "test-host".to_string(),
             verbose: false,
             relay_targets: Vec::new(),
+            csi_model_path: None,
+            csi_lora_path: None,
         }
     }
 

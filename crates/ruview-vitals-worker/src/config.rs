@@ -47,6 +47,23 @@ pub struct Config {
     /// by ADR-183 Tier 2 to route per-room CSI from worker Pis to
     /// the cognitum-v0 fusion master (`100.77.59.83:5005`).
     pub relay_targets: Vec<SocketAddr>,
+    /// ADR-183 Tier 3: path to `model.safetensors` from `ruv/ruview`.
+    /// When `Some`, the worker computes a 128-dim contrastive CSI
+    /// embedding after each vitals reading and POSTs it to the brain
+    /// as a `"spatial-csi-embedding"` memory.
+    /// Typically set to `/usr/local/share/ruvector/model.safetensors`
+    /// on cognitum-v0 after `deploy/compile-csi-encoder-hef.py` runs.
+    ///
+    /// Feature-gated: only parsed when built with `--features csi-embed`.
+    pub csi_model_path: Option<std::path::PathBuf>,
+    /// ADR-183 Tier 3 iter 18: path to a room-specific LoRA adapter JSON
+    /// (e.g. `/usr/local/share/ruvector/node-1.json`). When set alongside
+    /// `csi_model_path`, the base encoder embeddings are refined by a
+    /// rank-4 residual transform before being posted to the brain.
+    /// Env: `RUVIEW_CSI_LORA_ADAPTER`.
+    ///
+    /// Feature-gated: only parsed when built with `--features csi-embed`.
+    pub csi_lora_path: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -83,6 +100,22 @@ impl Config {
             .unwrap_or(false);
         let relay_targets = parse_addr_list("RUVIEW_VITALS_RELAY_TARGETS")?;
 
+        #[cfg(feature = "csi-embed")]
+        let csi_model_path = std::env::var("RUVIEW_CSI_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from);
+        #[cfg(not(feature = "csi-embed"))]
+        let csi_model_path: Option<std::path::PathBuf> = None;
+
+        #[cfg(feature = "csi-embed")]
+        let csi_lora_path = std::env::var("RUVIEW_CSI_LORA_ADAPTER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from);
+        #[cfg(not(feature = "csi-embed"))]
+        let csi_lora_path: Option<std::path::PathBuf> = None;
+
         if window_frames < 8 {
             return Err(Error::Config(
                 "RUVIEW_VITALS_WINDOW_FRAMES must be ≥ 8 (need at least one breathing cycle)"
@@ -102,6 +135,8 @@ impl Config {
             node_name,
             verbose,
             relay_targets,
+            csi_model_path,
+            csi_lora_path,
         })
     }
 }

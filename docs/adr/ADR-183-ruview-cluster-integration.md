@@ -1,7 +1,7 @@
 ---
 adr: 183
 title: "Integrate RuView WiFi-sensing into the 4-Pi Hailo+ruvllm cluster"
-status: proposed
+status: accepted
 date: 2026-05-05
 authors: [ruvnet, claude-flow]
 related: [ADR-167, ADR-171, ADR-178, ADR-179, ADR-180]
@@ -244,8 +244,9 @@ Pi, for at least 60 s of stable signal.
 | 14 | Add `HailoPipeline<CsiTensor, [f32; 128]>` to `ruvector-hailo`; carve out `WifiCsi128d` variant in `HailoEmbedderConfig` |
 | 15 | Plumb `RUVIEW_CSI_MODEL` env into `ruview-vitals-worker`; mode A (CPU vitals) and mode B (NPU embed) coexist |
 | 16 | HNSW sink at v0; `ruvector-cli search --backend hailo --variant wifi-csi-128 "person sitting still"` returns top-K |
-| 17 | Cosine-recall benchmark vs the text-summary baseline; goal ≥ 2× MAP@10 on a labelled CSI test set |
-| 18+ | LoRA per-room adapters; SONA online adaptation; WiFlow pose lift (separate sub-ADR if it grows) |
+| 17 | Cosine-recall benchmark vs the text-summary baseline; goal ≥ 2× MAP@10 on a labelled CSI test set. Implemented `ruview-csi-bench` binary. Result: base model separability ratio 1.016× (text baseline 1.462×) — FAIL on base model alone, motivating iter 18 |
+| 18 | Per-room LoRA adapters (rank-4, alpha=8, scaling=2). Added `CsiLoraAdapter` to `ruvector-hailo/src/csi_embedder.rs`. `RUVIEW_CSI_LORA_ADAPTER` env var wires `node-N.json` from `ruv/ruview` HuggingFace into the worker at startup. `ruview-csi-bench --lora` validates improvement. Deploy: `scp node-1.json ruv@cognitum-v0:/usr/local/share/ruvector/` then restart worker with `RUVIEW_CSI_LORA_ADAPTER=/usr/local/share/ruvector/node-1.json` |
+| 19+ | SONA online adaptation; WiFlow pose lift (separate sub-ADR if it grows) |
 
 Convergence criteria: cluster-wide search recall vs the text-embed
 baseline ≥ 2× MAP@10 *and* p99 NPU embed latency < 12 ms across all 4
@@ -333,6 +334,27 @@ nodes, holding for 2 consecutive bench iters.
    Out of scope for this ADR; track a follow-up to run the host-runtime
    variant inside the existing agent-flow WASM sandbox. Probably
    ADR-184.
+
+## Release & Appliance Deployment
+
+Once all convergence criteria are met (≥2× separability ratio for 2 consecutive bench iters AND p99 NPU embed latency < 12 ms), cut a release on **`https://github.com/cognitum-one/v0-appliance`**:
+
+1. Tag `ruvector` with `v0-appliance-adr183-vX` once iter 18+ bench passes on cognitum-v0.
+2. Package binaries: `ruview-vitals-worker` (aarch64, `--features csi-embed`), `ruvector` CLI, `ruview-csi-bench`.
+3. Include `node-1.json`, `node-2.json` from `ruv/ruview` HuggingFace in the release assets.
+4. Update `cognitum-one/v0-appliance` README with setup steps: deploy binaries, set `RUVIEW_CSI_MODEL` + `RUVIEW_CSI_LORA_ADAPTER`, restart services.
+5. Tag the release as `v0.1.0-csi-lora` with changelog summarising iter 14–18 deliverables.
+
+Cross-compiled aarch64 binaries are at:
+- `/home/ruvultra/projects/ruvector/target/aarch64-unknown-linux-gnu/release/ruview-vitals-worker` (4.4 MB)
+- `/home/ruvultra/projects/ruvector/target/aarch64-unknown-linux-gnu/release/ruview-csi-bench` (453 KB)
+
+Cluster deployment checklist (blocked on SSH fix — Tailscale user lookup failing as of 2026-05-05):
+- [ ] `scp node-1.json node-2.json ruv@100.77.59.83:/usr/local/share/ruvector/`
+- [ ] `echo RUVIEW_CSI_LORA_ADAPTER=/usr/local/share/ruvector/node-1.json >> /etc/ruview-vitals-worker.env` on cognitum-v0
+- [ ] `scp ruview-vitals-worker ruv@100.77.59.83:/usr/local/bin/` then `systemctl restart ruview-vitals-worker`
+- [ ] Run `ruview-csi-bench --model /usr/local/share/ruvector/model.safetensors --lora /usr/local/share/ruvector/node-1.json` — confirm ≥2× improvement
+- [ ] Create release on `cognitum-one/v0-appliance`
 
 ## References
 

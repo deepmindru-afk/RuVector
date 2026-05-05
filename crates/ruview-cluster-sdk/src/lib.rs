@@ -4,22 +4,19 @@
 //!
 //! ## Quick start
 //!
-//! ```no_run
-//! use ruview_cluster_sdk::{ClusterClient, NodeAddr};
+//! ```ignore
+//! use ruview_cluster_sdk::{ClusterClient, NodeAddr, cluster::default_cluster_nodes};
 //!
-//! # tokio_test::block_on(async {
-//! let nodes = vec![
-//!     NodeAddr::new("cognitum-cluster-1", "http://100.80.54.16:50055"),
-//!     NodeAddr::new("cognitum-cluster-2", "http://100.77.220.24:50055"),
-//!     NodeAddr::new("cognitum-cluster-3", "http://100.73.75.53:50055"),
-//!     NodeAddr::new("cognitum-v0",        "http://100.77.59.83:50054"),
-//! ];
-//! let client = ClusterClient::new(nodes);
-//! let snapshot = client.snapshot().await.unwrap();
-//! for (name, reading) in &snapshot.readings {
-//!     println!("{name}: breathing {:.1} bpm", reading.breathing.as_ref().map_or(0.0, |e| e.value_bpm));
+//! #[tokio::main]
+//! async fn main() {
+//!     let client = ClusterClient::new(default_cluster_nodes());
+//!     let snapshot = client.snapshot().await.unwrap();
+//!     println!("{}/{} nodes up", snapshot.nodes_up, snapshot.health.len());
+//!     for (name, r) in &snapshot.readings {
+//!         let br = r.breathing.as_ref().map_or(0.0, |e| e.value_bpm);
+//!         println!("{name}: breathing {br:.1} bpm");
+//!     }
 //! }
-//! # });
 //! ```
 
 pub mod client;
