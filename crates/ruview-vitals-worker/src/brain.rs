@@ -108,6 +108,53 @@ const fn status_label(s: VitalStatus) -> &'static str {
     }
 }
 
+/// Serialise a 128-dim embedding and POST it as "spatial-csi-embedding".
+#[cfg(feature = "csi-embed")]
+async fn post_csi_embedding(
+    client: &BrainClient,
+    state: &Arc<WorkerState>,
+    reading: &VitalReading,
+    embedding: &[f32; 128],
+) {
+    let mut buf = String::with_capacity(128 * 12);
+    buf.push('[');
+    for (i, v) in embedding.iter().enumerate() {
+        if i > 0 { buf.push(','); }
+        buf.push_str(&format!("{v:.6}"));
+    }
+    buf.push(']');
+    let content = format!(
+        "node_id={} node={} embedding={}",
+        reading.node_id, state.config.node_name, buf
+    );
+    match client.post_memory("spatial-csi-embedding", &content).await {
+        Ok(()) => {
+            state.stats.brain_posts_ok.fetch_add(1, Ordering::Relaxed);
+            tracing::info!(node_id = reading.node_id, "POST spatial-csi-embedding ok");
+        }
+        Err(e) => {
+            state.stats.brain_posts_failed.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(error = %e, node_id = reading.node_id, "POST spatial-csi-embedding failed");
+        }
+    }
+}
+
+/// Build the 8-element normalised feature vector from a `VitalReading`.
+/// Normalisation constants match those documented in `csi_embedder.rs`.
+#[cfg(feature = "csi-embed")]
+fn reading_to_csi_features(r: &VitalReading) -> ruvector_hailo::CsiFeatures {
+    ruvector_hailo::CsiFeatures {
+        breathing_bpm_norm:      (r.breathing.value_bpm  as f32 / 30.0).clamp(0.0, 1.0),
+        breathing_confidence:    r.breathing.confidence  as f32,
+        heart_rate_bpm_norm:     (r.heart_rate.value_bpm as f32 / 120.0).clamp(0.0, 1.0),
+        heart_rate_confidence:   r.heart_rate.confidence as f32,
+        motion_score:            0.0_f32, // not tracked at this worker tier
+        log_snr_norm:            (r.snr_db as f32 / 40.0).clamp(0.0, 1.0),
+        peak_amp_breathing_norm: r.breathing.confidence  as f32,
+        peak_amp_hr_norm:        r.heart_rate.confidence as f32,
+    }
+}
+
 /// Periodic loop: every `interval`, snapshot the latest readings and
 /// POST a memory per node. Runs until cancelled (i.e. forever for the
 /// worker; used as `tokio::spawn(run_brain_loop(...))`).
@@ -122,6 +169,62 @@ pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interv
         interval_secs = interval.as_secs(),
         "brain loop starting"
     );
+
+    // ADR-183 iter 19: SONA online LoRA adapter (preferred when lora_path is set).
+    // Falls back to static CsiEmbedderCpu when only model_path is set (no LoRA).
+    #[cfg(feature = "csi-embed")]
+    let sona: Option<std::sync::Mutex<crate::sona::SonaAdapter>> = {
+        match (
+            state.config.csi_model_path.as_deref(),
+            state.config.csi_lora_path.as_deref(),
+        ) {
+            (Some(mp), Some(lp)) => {
+                match crate::sona::SonaAdapter::load(mp, lp) {
+                    Ok(s) => {
+                        tracing::info!(
+                            model = %mp.display(),
+                            lora  = %lp.display(),
+                            "SONA online LoRA adapter loaded (ADR-183 iter 19)"
+                        );
+                        Some(std::sync::Mutex::new(s))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "SONA load failed — falling back to static embedder");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    };
+
+    // Static embedder: used when model_path is set but no LoRA (or SONA failed).
+    #[cfg(feature = "csi-embed")]
+    let csi_embedder: Option<ruvector_hailo::CsiEmbedderCpu> = {
+        #[cfg(feature = "csi-embed")]
+        if sona.is_some() {
+            None // SONA takes over when both paths are set
+        } else {
+            match state.config.csi_model_path.as_deref() {
+                Some(mp) => {
+                    match ruvector_hailo::CsiEmbedderCpu::open_with_lora(mp, None) {
+                        Ok(e) => {
+                            tracing::info!(path = %mp.display(), "CSI embedder loaded (ADR-183 Tier 3)");
+                            Some(e)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %mp.display(), "CSI embedder load failed");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        }
+        #[cfg(not(feature = "csi-embed"))]
+        None
+    };
+
     let mut tick = tokio::time::interval(interval);
     // Skip the immediate first tick — let the pipeline collect at
     // least one full window before we POST.
@@ -137,8 +240,8 @@ pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interv
         if readings.is_empty() {
             continue;
         }
-        for reading in readings {
-            let summary = format_vitals_summary(&reading, &state.config.node_name);
+        for reading in &readings {
+            let summary = format_vitals_summary(reading, &state.config.node_name);
             match client.post_memory("spatial-vitals", &summary).await {
                 Ok(()) => {
                     state.stats.brain_posts_ok.fetch_add(1, Ordering::Relaxed);
@@ -152,6 +255,33 @@ pub async fn run_brain_loop(client: BrainClient, state: Arc<WorkerState>, interv
                 Err(e) => {
                     state.stats.brain_posts_failed.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(error = %e, node_id = reading.node_id, "POST /memories failed");
+                }
+            }
+
+            // ADR-183 Tier 3 iter 19: SONA online adaptation + CSI embedding POST.
+            // SONA drives per-room LoRA adaptation from live vitals, then
+            // posts the adapted 128-dim embedding to the brain.
+            #[cfg(feature = "csi-embed")]
+            if let Some(ref sona_mutex) = sona {
+                if reading.status != crate::types::VitalStatus::Unavailable {
+                    let embedding = {
+                        // push() and embed() in a short lock scope
+                        let mut sona = sona_mutex.lock().unwrap();
+                        sona.push(reading);
+                        let features = reading_to_csi_features(reading);
+                        sona.embed(&features)
+                    };
+                    post_csi_embedding(&client, &state, reading, &embedding).await;
+                }
+            } else {
+                // Static embedder fallback (no LoRA path set).
+                #[cfg(feature = "csi-embed")]
+                if let Some(ref embedder) = csi_embedder {
+                    if reading.status != crate::types::VitalStatus::Unavailable {
+                        let features = reading_to_csi_features(reading);
+                        let embedding = embedder.embed(&features);
+                        post_csi_embedding(&client, &state, reading, &embedding).await;
+                    }
                 }
             }
         }
@@ -210,5 +340,44 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"category\":\"spatial-vitals\""));
         assert!(json.contains("\"content\":\"test\""));
+    }
+
+    /// Verify the feature-extraction function produces a sensible 8-vector.
+    /// Kept out of the `csi-embed` feature gate since `reading_to_csi_features`
+    /// is conditionally compiled — this test only runs with the feature.
+    #[cfg(feature = "csi-embed")]
+    #[test]
+    fn reading_to_features_normalises_correctly() {
+        use crate::types::{VitalEstimate, VitalStatus};
+        let r = VitalReading {
+            node_id: 3,
+            timestamp_us: 0,
+            breathing: VitalEstimate {
+                value_bpm: 15.0,
+                confidence: 0.9,
+                status: VitalStatus::Valid,
+            },
+            heart_rate: VitalEstimate {
+                value_bpm: 60.0,
+                confidence: 0.8,
+                status: VitalStatus::Valid,
+            },
+            snr_db: 20.0,
+            subcarrier_count: 56,
+            window_frames: 900,
+            status: VitalStatus::Valid,
+        };
+        let f = reading_to_csi_features(&r);
+        let arr = f.to_array();
+        // breathing_bpm_norm = 15/30 = 0.5
+        assert!((arr[0] - 0.5).abs() < 1e-5, "breathing norm");
+        // heart_rate_bpm_norm = 60/120 = 0.5
+        assert!((arr[2] - 0.5).abs() < 1e-5, "hr norm");
+        // log_snr_norm = 20/40 = 0.5
+        assert!((arr[5] - 0.5).abs() < 1e-5, "snr norm");
+        // All values in [0, 1]
+        for v in arr {
+            assert!(v >= 0.0 && v <= 1.0, "value out of [0,1]: {v}");
+        }
     }
 }

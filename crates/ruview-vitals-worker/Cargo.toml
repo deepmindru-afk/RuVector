@@ -21,6 +21,11 @@ ruview-integration = ["dep:wifi-densepose-vitals"]
 # already encrypts the wire; opt-in for defense-in-depth or non-
 # Tailscale deployments.
 tls = ["tonic/tls"]
+# ADR-183 Tier 3: CPU-path CSI contrastive encoder from ruv/ruview.
+# When enabled, RUVIEW_CSI_MODEL=/path/to/model.safetensors triggers
+# 128-dim contrastive embedding of each vitals reading and posts it
+# to the brain as "spatial-csi-embedding".
+csi-embed = ["dep:ruvector-hailo"]
 
 [dependencies]
 thiserror          = "2"
@@ -45,6 +50,13 @@ sha2               = "0.10"
 [dependencies.wifi-densepose-vitals]
 path             = "../../../RuView/rust-port/wifi-densepose-rs/crates/wifi-densepose-vitals"
 optional         = true
+default-features = false
+
+# Path-dep behind --features csi-embed. ADR-183 Tier 3.
+# Provides CsiEmbedderCpu (pure-Rust FC forward pass) + CSI_EMBED_DIM constant.
+[dependencies.ruvector-hailo]
+path    = "../ruvector-hailo"
+optional = true
 default-features = false
 
 [build-dependencies]
@@ -74,6 +86,20 @@ path = "src/bin/ruview-vitals-replay.rs"
 # brain_bridge.rs and our BrainClient both work unchanged.
 name = "ruview-mcp-brain-mini"
 path = "src/bin/ruview-mcp-brain-mini.rs"
+
+[[bin]]
+# `ruview-csi-bench` — ADR-183 Tier 3 iter 17. Cosine-separability
+# benchmark comparing 128-dim CSI contrastive embeddings vs the
+# text-feature baseline. Requires --features csi-embed.
+name = "ruview-csi-bench"
+path = "src/bin/ruview-csi-bench.rs"
+
+[[bin]]
+# `ruview-lora-init` — ADR-183 Tier 3 iter 19. Generates zero-init LoRA
+# adapter JSON (loraB=zeros, loraA=Gaussian) for SONA online adaptation.
+# Requires --features csi-embed.
+name = "ruview-lora-init"
+path = "src/bin/ruview-lora-init.rs"
 
 [lints.rust]
 # `deny` (not `forbid`) so `build.rs` can opt in for the one

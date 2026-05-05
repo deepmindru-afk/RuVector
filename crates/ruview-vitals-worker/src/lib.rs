@@ -42,6 +42,7 @@ pub mod heartrate;
 pub mod mcp_brain;
 pub mod pipeline;
 pub mod preprocessor;
+pub mod sona;
 pub mod state;
 pub mod types;
 pub mod window;
