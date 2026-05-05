@@ -159,7 +159,7 @@ GET  /health    → {model, backend, tok_per_sec, hailo_ok}
 | 9 | ✅ done | HTTP `/health` → `{"hailo_ok":true,"backend":"hailo10h","firmware_ver":"5.1.1"}`; gRPC :50058 open |
 | 10 | ✅ done | `RUVIEW_LLM_BACKEND=grpc://100.73.75.53:50058` appended to `/etc/ruview-vitals-worker.env` on cognitum-v0; service reloaded |
 | 11 | ✅ done | `check_ruvllm_h10()` added to `cluster-smoke-test.sh`; **23/23 assertions pass** |
-| 12 | pending | Security hardening: bind :50058 on Tailscale IP only; rate-limit /generate |
+| 12 | ✅ done | Security hardening: gRPC :50058 bound to Tailscale IP only; HTTP :8880 bound to loopback; `/generate` rate-limited at 20 RPM burst=5 with `max_concurrent=1` semaphore (returns 429 on excess); env vars: `RUVIEW_RUVLLM_RATE_LIMIT_RPM`, `RUVIEW_RUVLLM_RATE_LIMIT_BURST`, `RUVIEW_RUVLLM_MAX_CONCURRENT` |
 
 ### Performance Notes (Iter 7 measurement)
 
@@ -221,3 +221,4 @@ follow-up in ADR-184 Iter 12+.
 - [x] `cluster-smoke-test.sh` **23/23 PASS** with `ruview-ruvllm-h10` included
 - [x] No secrets in service files or code
 - [x] LLM backend registered on cognitum-v0 brain (`RUVIEW_LLM_BACKEND=grpc://100.73.75.53:50058`)
+- [x] `/generate` rate-limited: 20 RPM, burst=5, max_concurrent=1, returns 429 on excess

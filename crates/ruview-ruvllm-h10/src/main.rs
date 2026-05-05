@@ -10,17 +10,19 @@
 mod bridge;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_stream::try_stream;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bridge::HailoOllamaBridge;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing_subscriber::EnvFilter;
@@ -46,16 +48,89 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+// ──────────────────────────────────────────────── rate limiter
+
+/// Token-bucket rate limiter for the /generate HTTP endpoint.
+///
+/// Tokens refill at `tokens_per_min / 60` per second, capped at
+/// `burst`. Each /generate call consumes 1 token. If empty → 429.
+/// Implemented with atomics so it is `Send + Sync` without a Mutex.
+struct RateLimiter {
+    /// Tokens currently available (scaled ×1000 to avoid float).
+    tokens_millis: AtomicU64,
+    /// Timestamp of last refill (UNIX ms).
+    last_refill_ms: AtomicU64,
+    /// Refill rate: tokens per millisecond (×1000, i.e. tokens_per_min / 60_000).
+    refill_rate_per_ms_millis: u64,
+    /// Maximum burst (×1000).
+    burst_millis: u64,
+    /// Concurrency semaphore — hailo-ollama is single-threaded.
+    semaphore: Arc<Semaphore>,
+}
+
+impl RateLimiter {
+    fn new(tokens_per_min: u64, burst: u64, max_concurrent: usize) -> Self {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            tokens_millis: AtomicU64::new(burst * 1000),
+            last_refill_ms: AtomicU64::new(now_ms),
+            refill_rate_per_ms_millis: tokens_per_min.max(1) * 1000 / 60_000,
+            burst_millis: burst * 1000,
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+        }
+    }
+
+    /// Returns `true` if a token was acquired (request allowed).
+    fn try_acquire(&self) -> bool {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let last = self.last_refill_ms.load(Ordering::Relaxed);
+        let elapsed = now_ms.saturating_sub(last);
+        let added = elapsed * self.refill_rate_per_ms_millis;
+
+        if added > 0 {
+            self.last_refill_ms.store(now_ms, Ordering::Relaxed);
+            let cur = self.tokens_millis.load(Ordering::Relaxed);
+            let new = (cur + added).min(self.burst_millis);
+            self.tokens_millis.store(new, Ordering::Relaxed);
+        }
+
+        let cur = self.tokens_millis.load(Ordering::Relaxed);
+        if cur >= 1000 {
+            self.tokens_millis.fetch_sub(1000, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 // ──────────────────────────────────────────────── config
 
 struct Config {
-    grpc_listen: SocketAddr,
-    http_listen: SocketAddr,
-    model:       String,
+    grpc_listen:       SocketAddr,
+    http_listen:       SocketAddr,
+    model:             String,
+    rate_limit_rpm:    u64,
+    rate_limit_burst:  u64,
+    max_concurrent:    usize,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
+        let parse_u64 = |var: &str, default: u64| -> Result<u64> {
+            std::env::var(var)
+                .ok()
+                .map(|v| v.parse::<u64>().map_err(|e| Error::Config(format!("{var}: {e}"))))
+                .transpose()
+                .map(|o| o.unwrap_or(default))
+        };
         Ok(Self {
             grpc_listen: std::env::var("RUVIEW_RUVLLM_GRPC_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:50058".into())
@@ -65,8 +140,11 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8880".into())
                 .parse()
                 .map_err(|e| Error::Config(format!("HTTP_LISTEN: {e}")))?,
-            model: std::env::var("RUVIEW_RUVLLM_MODEL")
+            model:            std::env::var("RUVIEW_RUVLLM_MODEL")
                 .unwrap_or_else(|_| "llama3.2:1b".into()),
+            rate_limit_rpm:   parse_u64("RUVIEW_RUVLLM_RATE_LIMIT_RPM", 20)?,
+            rate_limit_burst: parse_u64("RUVIEW_RUVLLM_RATE_LIMIT_BURST", 5)?,
+            max_concurrent:   parse_u64("RUVIEW_RUVLLM_MAX_CONCURRENT", 1)? as usize,
         })
     }
 }
@@ -155,8 +233,9 @@ impl LlmService for LlmSvc {
 
 #[derive(Clone)]
 struct HttpState {
-    bridge: Arc<HailoOllamaBridge>,
+    bridge:  Arc<HailoOllamaBridge>,
     started: Instant,
+    rl:      Arc<RateLimiter>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +274,26 @@ async fn http_generate(
     State(s): State<HttpState>,
     Json(body): Json<GenerateBodyJson>,
 ) -> impl IntoResponse {
+    // Rate-limit check (token bucket).
+    if !s.rl.try_acquire() {
+        tracing::warn!("rate limit exceeded — returning 429");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "rate limit exceeded", "retry_after_s": 3})),
+        ).into_response();
+    }
+    // Concurrency semaphore — try immediately; don't queue forever.
+    let _permit = match s.rl.semaphore.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("max concurrent requests reached — returning 429");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "server busy", "retry_after_s": 10})),
+            ).into_response();
+        }
+    };
+
     let (tx, mut rx) = mpsc::channel::<(String, bool, i64)>(512);
     let bridge = Arc::clone(&s.bridge);
     let prompt  = body.prompt.clone();
@@ -212,7 +311,7 @@ async fn http_generate(
         out.push_str(&token);
         if done { break; }
     }
-    Json(serde_json::json!({"text": out, "model": s.bridge.model()}))
+    (StatusCode::OK, Json(serde_json::json!({"text": out, "model": s.bridge.model()}))).into_response()
 }
 
 // ──────────────────────────────────────────────── main
@@ -263,8 +362,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // HTTP proxy.
-    let http_state = HttpState { bridge: Arc::clone(&bridge), started };
+    // HTTP proxy with rate limiter.
+    let rl = Arc::new(RateLimiter::new(cfg.rate_limit_rpm, cfg.rate_limit_burst, cfg.max_concurrent));
+    tracing::info!(rpm = cfg.rate_limit_rpm, burst = cfg.rate_limit_burst,
+                   max_concurrent = cfg.max_concurrent, "rate limiter initialised");
+
+    let http_state = HttpState { bridge: Arc::clone(&bridge), started, rl };
     let app = Router::new()
         .route("/health", get(http_health))
         .route("/generate", post(http_generate))
