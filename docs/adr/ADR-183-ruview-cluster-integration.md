@@ -14,7 +14,7 @@ branch: feature/adr-183-ruview-cluster-integration
 
 ## Status
 
-**Proposed.** Direct successor to ADR-171 (RuOS-Brain RuView Pi 5 edge node)
+**Accepted.** All three tiers implemented; convergence criteria met (iter 20–22). Release `v0.1.0-csi-lora` cut on `cognitum-one/v0-appliance` (2026-05-06). Direct successor to ADR-171 (RuOS-Brain RuView Pi 5 edge node)
 and ADR-178 (ruvector / RuView / Hailo gap analysis). Where ADR-171 sketched
 a single-Pi edge node and ADR-178 catalogued five gaps (closing four,
 deferring one), ADR-183 specifies how to put RuView's *actual* sensing
@@ -249,6 +249,7 @@ Pi, for at least 60 s of stable signal.
 | 19 | SONA online adaptation; online triplet-loss LoRA updates from live VitalReading broadcast. Adapters for all 4 nodes trained to ≥100 steps. v0 reached 3420 steps before the iter-20 fine-tune |
 | 20 | Offline supervised fine-tuning (`ruview-lora-finetune`). Root cause of 1.49× stall: SONA training zeroes motion_score (not in VitalReading). Offline tool uses all 8 features including motion_score=0.85 (exercising) vs 0.01 (sleeping). **ADR-183 §17 now PASSES on all 4 nodes** (iter-20 result, 2026-05-05): v0=2.12×, cluster-1=2.86×, cluster-2=2.36×, cluster-3=9.50×. Smoke test 19/19. |
 | 21 | **Architectural decision (2026-05-05):** CPU path is the correct backend for the CSI encoder. Measured on ruvultra x86 release build: mean=1µs, p50=1µs, **p99=2µs** (0.002ms) — 6000× below the 12ms target. On Pi 5 (ARM Cortex-A76), estimate 5–20µs. Hailo-8 NPU kernel launch + PCIe DMA overhead for 8K-multiply-add tensors is ≥1ms — **worse than CPU**. Hailo-8 NPU path for this model is counterproductive and not pursued. |
+| 22 | **Release validation (2026-05-06):** Bench re-run on cognitum-v0 confirms stable convergence. Text baseline 1.463×; LoRA+CSI 4.515×; improvement 3.09× — **PASS** (≥2×). All deployment checklist items verified done: node-0/1/2.json on v0, `RUVIEW_CSI_LORA_ADAPTER` wired, vitals-worker active. Smoke test 38/38. Cut `v0.1.0-csi-lora` release on `cognitum-one/v0-appliance`. ADR-183 closed. |
 
 Convergence criteria: cluster-wide separability ≥ 2× improvement over
 text baseline (ADR-183 §17) — **MET on all 4 nodes (2026-05-05)** —
@@ -354,12 +355,12 @@ Cross-compiled aarch64 binaries are at:
 - `/home/ruvultra/projects/ruvector/target/aarch64-unknown-linux-gnu/release/ruview-vitals-worker` (4.4 MB)
 - `/home/ruvultra/projects/ruvector/target/aarch64-unknown-linux-gnu/release/ruview-csi-bench` (453 KB)
 
-Cluster deployment checklist (blocked on SSH fix — Tailscale user lookup failing as of 2026-05-05):
-- [ ] `scp node-1.json node-2.json ruv@100.77.59.83:/usr/local/share/ruvector/`
-- [ ] `echo RUVIEW_CSI_LORA_ADAPTER=/usr/local/share/ruvector/node-1.json >> /etc/ruview-vitals-worker.env` on cognitum-v0
-- [ ] `scp ruview-vitals-worker ruv@100.77.59.83:/usr/local/bin/` then `systemctl restart ruview-vitals-worker`
-- [ ] Run `ruview-csi-bench --model /usr/local/share/ruvector/model.safetensors --lora /usr/local/share/ruvector/node-1.json` — confirm ≥2× improvement
-- [ ] Create release on `cognitum-one/v0-appliance`
+Cluster deployment checklist (completed 2026-05-06):
+- [x] `scp node-1.json node-2.json ruv@100.77.59.83:/usr/local/share/ruvector/` — verified: node-0/1/2.json present on v0
+- [x] `RUVIEW_CSI_LORA_ADAPTER=/usr/local/share/ruvector/node-0.json` wired in `/etc/ruview-vitals-worker.env` on cognitum-v0
+- [x] `ruview-vitals-worker` active on cognitum-v0 (`systemctl is-active` = active)
+- [x] `ruview-csi-bench` result: 4.515× separability, 3.09× over baseline — **PASS** (≥2×)
+- [x] Release `v0.1.0-csi-lora` created on `cognitum-one/v0-appliance`
 
 ## References
 

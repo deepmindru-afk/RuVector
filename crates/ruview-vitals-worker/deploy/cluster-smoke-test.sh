@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# cluster-smoke-test.sh — ADR-183 Tier 2 iter 12
+# cluster-smoke-test.sh — ADR-183 Tier 2 iter 13
 #
 # Integration smoke test for the full ruview vitals + brain stack.
-# Checks each cluster node (workers + v0 master) for service health,
-# gRPC liveness, SONA adaptation progress, and brain reachability.
-#
-# Exits 0 only when all assertions pass. Non-zero exit on any failure.
+# Covers ADR-183 (vitals/brain), ADR-184 (H10H cluster-3), ADR-185
+# (H10H v0 + LLM router), ADR-018 (CSI bridge + H8 embedding workers).
+# 38 assertions total. Exits 0 only when all pass.
 #
 # Usage:
 #   bash cluster-smoke-test.sh [--quiet]
@@ -202,6 +201,28 @@ if [[ "$router_open" == "open" ]]; then
 else
   fail "router gRPC :50060 not reachable from ruvultra"
 fi
+
+echo ""
+echo "-- ADR-018 CSI bridge + H8 embedding worker (cluster-1, cluster-2) --"
+for csi_entry in "root@100.80.54.16:cognitum-cluster-1" "root@100.77.220.24:cognitum-cluster-2"; do
+  csi_host="${csi_entry%%:*}"
+  csi_label="${csi_entry##*:}"
+
+  check_service "$csi_host" "ruview-csi-bridge"
+
+  # UDP :5006 must be bound (CSI ingestion — vitals-worker owns :5005)
+  udp_bound=$(ssh -o ConnectTimeout=8 -o BatchMode=yes "$csi_host" \
+    "ss -ulnp 2>/dev/null | grep -cE ':5006\b' || echo 0" 2>&1 || echo 0)
+  udp_bound="${udp_bound//[^0-9]/}"
+  if [[ "${udp_bound:-0}" -gt 0 ]]; then
+    pass "ruview-csi-bridge UDP :5006 bound on $csi_label"
+  else
+    fail "ruview-csi-bridge UDP :5006 not bound on $csi_label"
+  fi
+
+  check_service "$csi_host" "ruvector-hailo-worker"
+  check_grpc    "$csi_host" "$csi_label" "50051"
+done
 
 echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="

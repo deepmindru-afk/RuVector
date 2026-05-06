@@ -128,8 +128,8 @@ degrades gracefully under partial failure.
 | 5 | ✅ done | `ruview-ruvllm-router` crate compiled, deployed on v0 `:50060`/`:8882` |
 | 6 | ✅ done | brain `RUVIEW_LLM_BACKEND=grpc://127.0.0.1:50060`; brain-mini env updated |
 | 7 | ✅ done | router `/health` shows 2/2 backends healthy (v0 local + cluster-3 via Tailscale) |
-| 8 | ✅ done | cluster-smoke-test.sh: **30/30 PASS** (all ADR-183/184/185 assertions) |
-| 9 | ✅ done | ADR-183 smoke test updated to 30 assertions |
+| 8 | ✅ done | cluster-smoke-test.sh: **38/38 PASS** (ADR-183/184/185 + ADR-018 CSI bridge + H8 worker) |
+| 9 | ✅ done | smoke test updated to 38 assertions (iter 13) |
 | 10 | ✅ done | committed to feat/realtime-dense-pointcloud (PR #425) |
 
 ---
@@ -153,4 +153,4 @@ degrades gracefully under partial failure.
 - [x] `ruview-ruvllm-router` running on v0 (gRPC :50060, HTTP :8882)
 - [x] Router `/health` shows 2/2 backends healthy
 - [x] Brain `RUVIEW_LLM_BACKEND=grpc://127.0.0.1:50060`
-- [x] `cluster-smoke-test.sh` passes with router assertions included (30/30)
+- [x] `cluster-smoke-test.sh` passes with all assertions included (38/38)
