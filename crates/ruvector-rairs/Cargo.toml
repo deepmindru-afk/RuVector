@@ -6,7 +6,7 @@ description = "RAIRS IVF: Redundant Assignment with Amplified Inverse Residual â
 authors     = ["ruvnet", "claude-flow"]
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/ruvnet/ruvector"
-keywords    = ["ann", "ivf", "vector-search", "approximate-nearest-neighbor", "ruvector"]
+keywords    = ["ann", "ivf", "vector-search", "nearest-neighbor", "ruvector"]
 categories  = ["algorithms", "data-structures"]
 
 [[bin]]
